@@ -1,0 +1,1547 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spring Screw Calculator</title>
+  <link rel="preconnect" href="https://esm.sh">
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #0D1B2A; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft JhengHei", sans-serif; }
+    #root { min-height: 100vh; }
+    .loading { display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; color: #7A9BBE; font-family: "Courier New", monospace;
+      font-size: 13px; letter-spacing: 2px; }
+    .loading-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #2E74B5; margin: 0 4px; animation: pulse 1.4s infinite ease-in-out; }
+    .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div class="loading">
+      <span>LOADING</span>
+      <span class="loading-dot"></span>
+      <span class="loading-dot"></span>
+      <span class="loading-dot"></span>
+    </div>
+  </div>
+  <script type="importmap">
+  {
+    "imports": {
+      "react":            "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "recharts":         "https://esm.sh/recharts@2.12.7?deps=react@18.3.1"
+    }
+  }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { useState, useCallback, useRef, useEffect } from "react";
+    import { createRoot } from "react-dom/client";
+    import {
+      LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
+      ReferenceLine, ReferenceDot, ResponsiveContainer, BarChart, Bar, Cell, Legend
+    } from "recharts";
+
+// ── palette ────────────────────────────────────────────────────────────────
+const C = {
+  navy:   "#0D1B2A",
+  steel:  "#1B3A5C",
+  sky:    "#2E74B5",
+  ice:    "#7BB8E8",
+  green:  "#2E7D4F",
+  amber:  "#D97706",
+  red:    "#B91C1C",
+  gold:   "#F59E0B",
+  panel:  "#0F2035",
+  border: "#1E3A5A",
+  text:   "#E2EAF4",
+  dim:    "#7A9BBE",
+};
+
+// ── data ────────────────────────────────────────────────────────────────────
+const SCREW_SPECS = {
+  M3: { d: 3.0, pitch: 0.5, As: 5.03  },
+  M4: { d: 4.0, pitch: 0.7, As: 8.78  },
+  M5: { d: 5.0, pitch: 0.8, As: 14.2  },
+  M6: { d: 6.0, pitch: 1.0, As: 20.1  },
+  M8: { d: 8.0, pitch: 1.25,As: 36.6  },
+};
+const K_FACTORS = {
+  "乾燥無潤滑 (Dry)":   0.20,
+  "鍍鋅 (Zinc)":        0.17,
+  "黑磷酸鹽 (Phos.)":  0.15,
+  "含油 (Lubricated)":  0.13,
+};
+const MAT_G = {
+  "碳鋼琴鋼線 SWC":  { G: 79000, E: 206000, nu: 0.30, coeff: 2090, exp: -0.167 },
+  "不鏽鋼 SUS304":   { G: 69000, E: 193000, nu: 0.30, coeff: 1867, exp: -0.146 },
+  "不鏽鋼 SUS316":   { G: 69000, E: 200000, nu: 0.30, coeff: 1800, exp: -0.146 },
+  "鉻釩鋼 SUP10":    { G: 79000, E: 206000, nu: 0.30, coeff: 2370, exp: -0.167 },
+  "磷青銅 C5191":    { G: 43000, E: 110000, nu: 0.34, coeff: 932,  exp: -0.064 },
+  "Inconel 718":     { G: 77000, E: 205000, nu: 0.29, coeff: 1800, exp: -0.10  },
+};
+const END_COILS = {
+  "閉合並磨平 (+2)": 2, "閉合端 (+2)": 2,
+  "開放端 (+0)": 0,     "開放磨平 (+1)": 1,
+};
+
+// ── math ─────────────────────────────────────────────────────────────────────
+const wahl = C => (4*C-1)/(4*C-4) + 0.615/C;
+
+function calcScrew(torqueNm, kCoeff, spec) {
+  const Fn   = torqueNm / (kCoeff * spec.d / 1000);
+  return { Fn, Fkgf: Fn/9.80665, sigma: Fn/spec.As };
+}
+
+function calcSpring(d, D, Na, G, L0, Lw) {
+  const C     = D / d;
+  const delta = L0 - Lw;
+  const k     = G * d**4 / (8 * D**3 * Na);
+  const F     = k * delta;
+  const Kw    = wahl(C);
+  const tau   = F > 0 ? 8*F*D*Kw / (Math.PI * d**3) : 0;
+  const OD    = D + d, ID = D - d;
+  return { C, delta, k, F, Kw, tau, OD, ID };
+}
+
+// 碟形彈簧（Belleville）— DIN 2093 公式
+function calcBelleville(De, Di, t, h0, s, E, nu) {
+  const dRatio = De / Di;
+  const lnD    = Math.log(dRatio);
+  const K1     = (1 / Math.PI) * ((dRatio - 1) / dRatio) ** 2
+                 / ((dRatio + 1) / (dRatio - 1) - 2 / lnD);
+  const K2     = (6 / (Math.PI * lnD)) * ((dRatio - 1) / lnD - 1);
+  const K3     = (3 / (Math.PI * lnD)) * (dRatio - 1);
+
+  const A   = (4 * E) / ((1 - nu * nu) * K1 * De * De);
+  // F(s) = A·t·s · [(h0-s)·(h0-s/2) + t²]
+  const Fof = (sv) => A * t * sv * ((h0 - sv) * (h0 - sv / 2) + t * t);
+
+  const F      = Fof(s);
+  const k_avg  = s > 0 ? F / s : 0;
+  // 初始剛度 dF/ds at s=0
+  const k_init = A * t * (h0 * h0 + t * t);
+
+  // 應力（最大壓應力，內上邊緣 OM）
+  const sigmaPre = (4 * E * t) / ((1 - nu * nu) * K1 * De * De);
+  const sigma_OM = Math.abs(sigmaPre * s * (K2 * (h0 - s / 2) + K3 * t));
+
+  // 力 / 位移曲線
+  const points = [];
+  for (let i = 0; i <= 50; i++) {
+    const sv = h0 * i / 50;
+    points.push({ x: +sv.toFixed(3), F: +Fof(sv).toFixed(2) });
+  }
+
+  return {
+    dRatio, K1, K2, K3, F, k_avg, k_init, sigma_OM,
+    h0_over_t: h0 / t, s_over_h0: s / h0, points,
+    L0: h0 + t,
+  };
+}
+
+// 波形彈簧（Wave Spring）— Smalley 多圈 crest-to-crest 公式
+function calcWave(OD, ID, t, N, n, s, E) {
+  const Dm = (OD + ID) / 2;
+  const b  = (OD - ID) / 2;
+  // k = E·b·t³·N⁴ / (Dm³·n³·(N²-1)²)
+  const k     = (E * b * t ** 3 * N ** 4) / (Dm ** 3 * n ** 3 * (N * N - 1) ** 2);
+  const F     = k * s;
+  // 應力：σ = 3π·F·Dm / (4·b·t²·N²)
+  const sigma = (3 * Math.PI * F * Dm) / (4 * b * t * t * N * N);
+  return { Dm, b, k, F, sigma };
+}
+
+// 找不到螺旋彈簧時的替代方案推薦
+function recommendAlternatives(F, delta, L0, ODmax) {
+  const kReq = F / delta;
+  const alts = [];
+
+  // 1️⃣ 碟形彈簧（Belleville）— 高剛度首選
+  const stdOD = [10, 12, 14, 16, 18, 20, 22, 25, 28, 31.5, 35.5, 40, 45, 50, 56, 63];
+  const fitting = stdOD.filter(od => od <= ODmax);
+  if (fitting.length && kReq > 20) {
+    const od        = fitting[fitting.length - 1];
+    const tApprox   = Math.cbrt(F * od * od / 1.5e6);
+    const stdT      = [0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+    const t         = stdT.find(x => x >= tApprox) || stdT[stdT.length - 1];
+    const h0        = +(t * 1.6).toFixed(2);
+    const kSingle   = 1.5e6 * t ** 3 / (od * od);
+    const FSingle   = kSingle * h0 * 0.75;
+    const nParallel = Math.max(1, Math.ceil(F / FSingle));
+    const nSeries   = Math.max(1, Math.ceil(delta / (h0 * 0.75)));
+    const stackH    = +((nParallel + nSeries - 1) * t).toFixed(1);
+    alts.push({
+      type: "碟形彈簧 Belleville",
+      icon: "🔶",
+      why: "高剛度、軸向空間緊湊；本來螺旋彈簧吃不下的高 k 場合首選",
+      params: [
+        ["外徑 OD",  `${od} mm`],
+        ["厚度 t",   `${t} mm`],
+        ["錐高 h₀",  `${h0} mm`],
+        ["並聯片數", `${nParallel} 片（提高負載力）`],
+        ["串聯組數", `${nSeries} 組（增加行程）`],
+        ["疊合高度", `~${stackH} mm`],
+      ],
+      fit: stackH <= L0 ? "ok" : "warn",
+      fitNote: stackH <= L0
+        ? `堆疊高度 ${stackH} mm ≤ 可用 L₀ ${L0} mm`
+        : `疊合高度 ${stackH} mm 略大於 L₀ ${L0} mm，需考量是否容得下`,
+      note: "需精確導引（建議搭配導柱或導套）；可調整並串聯比例以微調 k 與行程",
+    });
+  }
+
+  // 2️⃣ 波形彈簧（Wave Spring）— 中低剛度 + 省空間
+  if (kReq >= 5 && kReq <= 300) {
+    alts.push({
+      type: "波形彈簧 Wave Spring",
+      icon: "🌊",
+      why: "軸向空間比螺旋彈簧省 ~50%，力量分布均勻",
+      params: [
+        ["適用 k 範圍",  "5 ~ 300 N/mm"],
+        ["當前 k 需求",  `${fmtK(kReq)} N/mm（在範圍內 ✓）`],
+        ["建議型式",     "Crest-to-crest 多層交錯"],
+        ["軸向高度",     "比螺旋少約 50%"],
+        ["最大外徑",     `≤ ${ODmax} mm（依需求）`],
+      ],
+      fit: "ok",
+      fitNote: "適合中等剛度且追求扁平化的場合",
+      note: "標準品較多（Smalley、TFC 等），可直接買現貨",
+    });
+  }
+
+  // 3️⃣ 多支螺旋彈簧並聯 — 把高 k 拆給多支
+  if (kReq > 100 && ODmax > 0) {
+    const nPar = Math.min(6, Math.ceil(kReq / 100));
+    alts.push({
+      type: `多支螺旋彈簧並聯（${nPar} 支）`,
+      icon: "🌀×N",
+      why: "把單支吃不下的 k 拆給多支共同負擔",
+      params: [
+        ["並聯支數",  `${nPar} 支`],
+        ["每支 k 需求", `${fmtK(kReq / nPar)} N/mm`],
+        ["每支 F 需求", `${(F / nPar).toFixed(1)} N`],
+        ["單支外徑",   `≤ ${Math.floor(ODmax / Math.sqrt(nPar))} mm（圓周分布）`],
+      ],
+      fit: "warn",
+      fitNote: "需在外圍環狀排列，組裝座須設計多個導孔",
+      note: "適合大型法蘭、夾持機構等可容納多支彈簧的場合",
+    });
+  }
+
+  // 4️⃣ 增加 δ 的建議（最簡單的解法）
+  const minDeltaSWC = F / 1500;  // 約略：碳鋼螺旋彈簧能達到的最高 k
+  if (minDeltaSWC > delta && minDeltaSWC < 50) {
+    alts.push({
+      type: "調整設計參數（最簡單）",
+      icon: "🔧",
+      why: "若可改設計，加大壓縮量 δ 就能用回最便宜的螺旋彈簧",
+      params: [
+        ["當前 δ",       `${delta} mm（k = ${fmtK(kReq)} N/mm）`],
+        ["建議 δ",       `≥ ${minDeltaSWC.toFixed(1)} mm`],
+        ["建議 L₀",      `≥ ${(minDeltaSWC * 5).toFixed(0)} mm（給足 5× 行程餘裕）`],
+        ["建議 OD",      `≥ ${(ODmax * 1.3).toFixed(0)} mm`],
+      ],
+      fit: "warn",
+      fitNote: "若機構允許，改設計往往是最划算的選擇",
+      note: "螺旋彈簧成本約為碟形 1/5、Wave 的 1/3",
+    });
+  }
+
+  return alts;
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+const fmt1  = n => n.toFixed(1);
+const fmt2  = n => n.toFixed(2);
+const fmt3  = n => n.toFixed(3);
+const fmtK  = n => n >= 10000 ? n.toFixed(0) : n.toFixed(2);
+const sfColor = sf =>
+  sf >= 1.5 ? C.green : sf >= 1.2 ? C.amber : C.red;
+
+// ── tiny components ──────────────────────────────────────────────────────────
+function Label({ children }) {
+  return <span style={{ color: C.dim, fontSize: 11, fontFamily: "Courier New", letterSpacing: 1, textTransform: "uppercase" }}>{children}</span>;
+}
+
+function Value({ children, big, color }) {
+  return (
+    <span style={{
+      color: color || C.ice, fontFamily: "Courier New",
+      fontSize: big ? 26 : 15, fontWeight: 700, letterSpacing: big ? 1 : 0
+    }}>{children}</span>
+  );
+}
+
+function Field({ label, value, unit, sub }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ marginBottom: 3 }}><Label>{label}</Label></div>
+      <div>
+        <Value>{value}</Value>
+        {unit && <span style={{ color: C.dim, fontSize: 12, marginLeft: 4 }}>{unit}</span>}
+      </div>
+      {sub && <div style={{ color: C.dim, fontSize: 11, marginTop: 2 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function Input({ label, value, onChange, step = 0.1, min = 0, unit }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 4 }}><Label>{label}</Label></div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          type="number" value={value} step={step} min={min}
+          onChange={e => onChange(parseFloat(e.target.value) || 0)}
+          style={{
+            background: "#0A1929", border: `1px solid ${C.border}`, color: C.text,
+            padding: "7px 10px", borderRadius: 4, width: 110, fontFamily: "Courier New",
+            fontSize: 14, outline: "none",
+          }}
+        />
+        {unit && <span style={{ color: C.dim, fontSize: 12 }}>{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function Select({ label, value, onChange, options }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 4 }}><Label>{label}</Label></div>
+      <select
+        value={value} onChange={e => onChange(e.target.value)}
+        style={{
+          background: "#0A1929", border: `1px solid ${C.border}`, color: C.text,
+          padding: "7px 10px", borderRadius: 4, fontFamily: "Courier New", fontSize: 13,
+          outline: "none", cursor: "pointer", width: "100%", maxWidth: 260,
+        }}
+      >
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function SectionTitle({ children, icon }) {
+  return (
+    <div style={{
+      borderLeft: `3px solid ${C.sky}`, paddingLeft: 12, marginBottom: 16, marginTop: 4,
+    }}>
+      <span style={{ color: C.sky, fontSize: 11, fontFamily: "Courier New", letterSpacing: 2, textTransform: "uppercase" }}>
+        {icon} {children}
+      </span>
+    </div>
+  );
+}
+
+function Card({ children, style }) {
+  return (
+    <div style={{
+      background: C.panel, border: `1px solid ${C.border}`,
+      borderRadius: 8, padding: "18px 20px", ...style
+    }}>{children}</div>
+  );
+}
+
+function Badge({ sf }) {
+  const bg = sfColor(sf);
+  const label = sf >= 1.5 ? "SAFE" : sf >= 1.2 ? "MARGINAL" : "FAIL";
+  return (
+    <div style={{
+      display: "inline-block", background: bg + "22",
+      border: `1.5px solid ${bg}`, borderRadius: 4,
+      padding: "3px 10px", color: bg, fontFamily: "Courier New",
+      fontSize: 12, fontWeight: 700, letterSpacing: 2,
+    }}>{label} SF={fmt2(sf)}</div>
+  );
+}
+
+// ── Spring SVG diagram ────────────────────────────────────────────────────────
+function SpringDiagram({ d, D, Na, L0, Lw, OD, Ls, Ne }) {
+  const W = 160, H = 280;
+  const pad = 24;
+  const drawH = H - pad * 2;
+  const scaleY = drawH / (L0 * 1.15);
+  const cx = W / 2;
+  const springX = (OD / 2) * scaleY * 0.8;  // scale OD to fit
+
+  // generate coil path
+  const pts = [];
+  const totalPts = Math.round(Na * 40);
+  for (let i = 0; i <= totalPts; i++) {
+    const t = i / totalPts;
+    const angle = t * Na * 2 * Math.PI;
+    const x = cx + springX * Math.cos(angle);
+    const y = pad + (1 - t) * drawH;
+    pts.push(`${x},${y}`);
+  }
+  const pathD = "M " + pts.join(" L ");
+
+  const yTop    = pad;
+  const yBot    = pad + drawH;
+  const yLw     = pad + (1 - Lw / (L0 * 1.15)) * drawH;
+  const yLs     = pad + (1 - Ls / (L0 * 1.15)) * drawH;
+  const strokeW = Math.max(1.5, d * scaleY * 0.6);
+
+  return (
+    <svg width={W} height={H} style={{ display: "block", margin: "0 auto" }}>
+      {/* Solid height line */}
+      <line x1={cx - springX - 8} y1={yLs} x2={cx + springX + 8} y2={yLs}
+            stroke={C.amber} strokeWidth={1} strokeDasharray="4,3" opacity={0.7} />
+      <text x={cx + springX + 10} y={yLs + 4} fill={C.amber} fontSize={9} fontFamily="Courier New">Ls</text>
+
+      {/* Working length marker */}
+      <line x1={6} y1={yBot} x2={6} y2={yLw} stroke={C.green} strokeWidth={1.5} />
+      <line x1={2} y1={yBot} x2={10} y2={yBot} stroke={C.green} strokeWidth={1.5} />
+      <line x1={2} y1={yLw} x2={10} y2={yLw} stroke={C.green} strokeWidth={1.5} />
+      <text x={12} y={(yBot + yLw) / 2 + 4} fill={C.green} fontSize={9} fontFamily="Courier New">Lw</text>
+
+      {/* Free length marker */}
+      <line x1={W - 6} y1={yBot} x2={W - 6} y2={yTop} stroke={C.red} strokeWidth={1.5} />
+      <line x1={W - 10} y1={yBot} x2={W - 2} y2={yBot} stroke={C.red} strokeWidth={1.5} />
+      <line x1={W - 10} y1={yTop} x2={W - 2} y2={yTop} stroke={C.red} strokeWidth={1.5} />
+      <text x={W - 9} y={(yBot + yTop) / 2 + 4} fill={C.red} fontSize={9} fontFamily="Courier New"
+            textAnchor="end">L₀</text>
+
+      {/* End plates */}
+      {Ne >= 1 && <>
+        <rect x={cx - springX - 2} y={yTop} width={springX * 2 + 4} height={strokeW * 1.2}
+              fill={C.steel} opacity={0.9} rx={1} />
+        <rect x={cx - springX - 2} y={yBot - strokeW * 1.2} width={springX * 2 + 4} height={strokeW * 1.2}
+              fill={C.steel} opacity={0.9} rx={1} />
+      </>}
+
+      {/* Coil */}
+      <path d={pathD} stroke={C.sky} strokeWidth={strokeW}
+            fill="none" strokeLinecap="round" strokeLinejoin="round" />
+
+      {/* OD label */}
+      <line x1={cx - springX} y1={H - 14} x2={cx + springX} y2={H - 14}
+            stroke={C.ice} strokeWidth={1} markerStart="url(#arr)" markerEnd="url(#arr)" />
+      <text x={cx} y={H - 4} fill={C.ice} fontSize={9} fontFamily="Courier New" textAnchor="middle">OD</text>
+
+      <defs>
+        <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={C.ice} />
+        </marker>
+      </defs>
+    </svg>
+  );
+}
+
+// ── Force–Deflection chart ────────────────────────────────────────────────────
+function ForceChart({ k, delta, F, Ls, L0 }) {
+  const dMax   = L0 - Ls;
+  const points = Array.from({ length: 61 }, (_, i) => {
+    const x = (dMax * 1.05 * i) / 60;
+    return { x: +x.toFixed(3), F: +(k * x).toFixed(2) };
+  });
+
+  const CustomDot = ({ cx, cy, payload }) => {
+    if (Math.abs(payload.x - delta) > dMax * 0.018) return null;
+    return <circle cx={cx} cy={cy} r={6} fill={C.red} stroke="#fff" strokeWidth={2} />;
+  };
+
+  const TooltipContent = ({ active, payload }) => {
+    if (!active || !payload?.length) return null;
+    const { x, F: fv } = payload[0].payload;
+    return (
+      <div style={{ background: C.navy, border: `1px solid ${C.border}`, padding: "8px 12px", borderRadius: 4, fontFamily: "Courier New", fontSize: 12 }}>
+        <div style={{ color: C.dim }}>δ = <span style={{ color: C.text }}>{x} mm</span></div>
+        <div style={{ color: C.dim }}>F = <span style={{ color: C.ice }}>{fv} N</span></div>
+      </div>
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={200}>
+      <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+        <XAxis dataKey="x" stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
+               label={{ value: "δ (mm)", position: "insideBottomRight", offset: -4, fill: C.dim, fontSize: 10 }} />
+        <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
+               label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
+        <Tooltip content={<TooltipContent />} />
+        <ReferenceLine x={dMax} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.5} label={{ value: "Ls", fill: C.amber, fontSize: 9 }} />
+        <ReferenceDot x={delta} y={F} r={0} />
+        <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
+              dot={<CustomDot />} activeDot={{ r: 4, fill: C.ice }} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ── Stress bar chart ─────────────────────────────────────────────────────────
+function StressChart({ tau, tauAllow, Sut }) {
+  const data = [
+    { name: "工作應力 τ", value: +tau.toFixed(1), fill: C.sky },
+    { name: "許用應力 τ_allow", value: +tauAllow.toFixed(1), fill: C.green },
+    { name: "Sut × 0.45", value: +tauAllow.toFixed(1), fill: C.border },
+  ];
+  return (
+    <ResponsiveContainer width="100%" height={160}>
+      <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+        <XAxis dataKey="name" tick={{ fill: C.dim, fontSize: 9, fontFamily: "Courier New" }} />
+        <YAxis tick={{ fill: C.dim, fontSize: 9, fontFamily: "Courier New" }} />
+        <Tooltip
+          contentStyle={{ background: C.navy, border: `1px solid ${C.border}`, fontFamily: "Courier New", fontSize: 11 }}
+          labelStyle={{ color: C.text }}
+          itemStyle={{ color: C.ice }}
+        />
+        <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+          {data.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
+        </Bar>
+        <ReferenceLine y={tauAllow} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.5} />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+// ── Tab button ────────────────────────────────────────────────────────────────
+function Tab({ label, active, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      background: active ? C.sky : "transparent",
+      border: `1px solid ${active ? C.sky : C.border}`,
+      color: active ? "#fff" : C.dim,
+      padding: "8px 22px", borderRadius: 4, cursor: "pointer",
+      fontFamily: "Courier New", fontSize: 12, letterSpacing: 1,
+      transition: "all .15s",
+    }}>{label}</button>
+  );
+}
+
+function CalcButton({ onClick, children }) {
+  return (
+    <button onClick={onClick} style={{
+      background: `linear-gradient(135deg, ${C.sky}, ${C.steel})`,
+      border: "none", color: "#fff", padding: "10px 28px",
+      borderRadius: 6, cursor: "pointer", fontFamily: "Courier New",
+      fontSize: 13, fontWeight: 700, letterSpacing: 2,
+      boxShadow: `0 4px 14px ${C.sky}44`,
+      transition: "opacity .15s",
+    }} onMouseEnter={e => e.target.style.opacity = ".85"}
+       onMouseLeave={e => e.target.style.opacity = "1"}>
+      {children}
+    </button>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODULE A: 螺絲軸力 + 彈簧選型
+// ════════════════════════════════════════════════════════════════════════════
+function ScrewModule() {
+  const [screw,  setScrew]  = useState("M6");
+  const [kKey,   setKKey]   = useState("乾燥無潤滑 (Dry)");
+  const [torque, setTorque] = useState(2.5);
+  const [unit,   setUnit]   = useState("N·m");
+  const [delta,  setDelta]  = useState(2.0);
+  const [L0,     setL0]     = useState(25.0);
+  const [ODmax,  setODmax]  = useState(15.0);
+  const [mat,    setMat]    = useState("碳鋼琴鋼線 SWC");
+  const [res,    setRes]    = useState(null);
+
+  const calc = () => {
+    const spec    = SCREW_SPECS[screw];
+    const kCoeff  = K_FACTORS[kKey];
+    const tNm     = unit === "N·m" ? torque : torque * 0.0980665;
+    const { Fn, Fkgf, sigma } = calcScrew(tNm, kCoeff, spec);
+    const kReq    = Fn / delta;
+    const matData = MAT_G[mat];
+    const G       = matData.G;
+
+    // Design coil spring
+    const STD = [0.3,0.4,0.5,0.6,0.7,0.8,1.0,1.2,1.4,1.6,1.8,2.0,2.5,3.0,3.5,4.0,5.0,6.0];
+    const designs = [];
+    for (const d of STD) {
+      const Sut  = matData.coeff * Math.pow(d, matData.exp);
+      const tauA = 0.45 * Sut;
+      for (let Cx2 = 8; Cx2 <= 24; Cx2++) {
+        const Cv = Cx2 / 2;
+        const D  = Cv * d, OD = D + d, ID = D - d;
+        if (OD > ODmax) continue;
+        const Na = G * d**4 / (8 * D**3 * kReq);
+        if (Na < 1.5 || Na > 30) continue;
+        const Na_r = Math.round(Na * 2) / 2;
+        const Nt   = Na_r + 2, Ls = Nt * d;
+        if (L0 < Ls + delta * 1.15) continue;
+        const kAct = G * d**4 / (8 * D**3 * Na_r);
+        const Kw   = wahl(Cv);
+        const tau  = 8 * Fn * D * Kw / (Math.PI * d**3);
+        const SF   = tauA / tau;
+        if (SF < 1.2) continue;
+        designs.push({ d, D: +D.toFixed(2), OD: +OD.toFixed(2), ID: +ID.toFixed(2),
+          C: +Cv.toFixed(1), Na: Na_r, Nt, Ls: +Ls.toFixed(2), k: +kAct.toFixed(2),
+          kErr: +(Math.abs(kAct - kReq) / kReq * 100).toFixed(1),
+          tau: +tau.toFixed(1), tauAllow: +tauA.toFixed(1), SF: +SF.toFixed(2),
+          Sut: +Sut.toFixed(0), slender: +(L0/D).toFixed(2) });
+      }
+    }
+    designs.sort((a, b) => b.SF - a.SF || a.kErr - b.kErr);
+
+    const top5 = designs.slice(0, 5);
+    const alts = top5.length === 0 ? recommendAlternatives(Fn, delta, L0, ODmax) : [];
+
+    setRes({ tNm, Fn, Fkgf, sigma, kReq, designs: top5, alternatives: alts, delta, L0, ODmax, kCoeff, matData });
+  };
+
+  const inputCol = { display: "flex", flexDirection: "column", gap: 0 };
+  const row = { display: "flex", flexWrap: "wrap", gap: 24 };
+
+  return (
+    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+      {/* LEFT: Inputs */}
+      <Card style={{ flex: "0 0 300px" }}>
+        <SectionTitle icon="🔩">螺絲參數</SectionTitle>
+        <div style={row}>
+          <Select label="螺絲規格" value={screw} onChange={setScrew} options={Object.keys(SCREW_SPECS)} />
+          <Select label="扭力係數 K" value={kKey} onChange={setKKey} options={Object.keys(K_FACTORS)} />
+        </div>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-end" }}>
+          <Input label="扭力" value={torque} onChange={setTorque} step={0.1} min={0.001} />
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 4 }}><Label>單位</Label></div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {["N·m", "kgf·cm"].map(u => (
+                <button key={u} onClick={() => setUnit(u)} style={{
+                  background: unit===u ? C.sky : "transparent",
+                  border: `1px solid ${unit===u ? C.sky : C.border}`,
+                  color: unit===u ? "#fff" : C.dim, padding: "7px 10px",
+                  borderRadius: 4, cursor: "pointer", fontFamily: "Courier New", fontSize: 11
+                }}>{u}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <SectionTitle icon="🌀">彈簧條件</SectionTitle>
+        <div style={row}>
+          <Input label="壓縮量 δ" value={delta} onChange={setDelta} step={0.5} unit="mm" />
+          <Input label="自由長 L₀" value={L0} onChange={setL0} step={1} unit="mm" />
+          <Input label="最大外徑" value={ODmax} onChange={setODmax} step={0.5} unit="mm" />
+        </div>
+        <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
+
+        <div style={{ marginTop: 8 }}>
+          <CalcButton onClick={calc}>▶ 計算</CalcButton>
+        </div>
+      </Card>
+
+      {/* RIGHT: Results */}
+      {res && (
+        <div style={{ flex: 1, minWidth: 340, display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* KPIs */}
+          <Card>
+            <SectionTitle icon="📊">螺絲軸力</SectionTitle>
+            <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+              <div>
+                <Label>軸力 F</Label>
+                <div><Value big color={C.sky}>{res.Fn.toFixed(1)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{res.Fkgf.toFixed(2)} kgf</div>
+              </div>
+              <div>
+                <Label>螺絲應力 σ</Label>
+                <div><Value>{res.sigma.toFixed(1)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>MPa</span>
+                </div>
+              </div>
+              <div>
+                <Label>彈簧 k 需求</Label>
+                <div><Value color={C.gold}>{fmtK(res.kReq)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>= {res.Fn.toFixed(0)} ÷ {delta}</div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Design table */}
+          {res.designs.length > 0 ? (
+            <Card>
+              <SectionTitle icon="🌀">彈簧設計建議</SectionTitle>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "Courier New", fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      {["#","材料簡稱","d(mm)","OD(mm)","Na圈","k(N/mm)","k誤差","SF","挫曲"].map(h => (
+                        <th key={h} style={{ padding: "4px 8px", color: C.dim, textAlign: "left", fontWeight: 400, whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {res.designs.map((d, i) => (
+                      <tr key={i} style={{ background: i === 0 ? C.sky + "18" : "transparent", borderBottom: `1px solid ${C.border}22` }}>
+                        <td style={{ padding: "5px 8px", color: i===0 ? C.gold : C.dim }}>{i===0?"★":`#${i+1}`}</td>
+                        <td style={{ padding: "5px 8px", color: C.text }}>{mat.split(" ")[0]}</td>
+                        <td style={{ padding: "5px 8px", color: C.ice, fontWeight: i===0?700:400 }}>{d.d}</td>
+                        <td style={{ padding: "5px 8px", color: C.ice }}>{d.OD}</td>
+                        <td style={{ padding: "5px 8px", color: C.text }}>{d.Na}</td>
+                        <td style={{ padding: "5px 8px", color: C.gold, fontWeight: 700 }}>{d.k}</td>
+                        <td style={{ padding: "5px 8px", color: C.dim }}>{d.kErr}%</td>
+                        <td style={{ padding: "5px 8px" }}><span style={{ color: sfColor(d.SF), fontWeight: 700 }}>{d.SF}</span></td>
+                        <td style={{ padding: "5px 8px", color: d.slender > 4 ? C.amber : C.green, fontSize: 10 }}>
+                          {d.slender > 4 ? "⚠需導桿" : "✓穩定"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {res.designs[0] && (
+                <div style={{ marginTop: 14, padding: "12px 16px", background: C.gold + "11", border: `1px solid ${C.gold}44`, borderRadius: 6, fontSize: 11, fontFamily: "Courier New", lineHeight: 1.9 }}>
+                  <span style={{ color: C.gold, fontWeight: 700 }}>★ 最佳方案規格</span>
+                  {(() => {
+                    const b = res.designs[0];
+                    return (
+                      <div style={{ color: C.text, marginTop: 4 }}>
+                        型式：壓縮螺旋彈簧，閉合並磨平端 &nbsp;|&nbsp; 材料：{mat}<br />
+                        線徑 d = <b style={{ color: C.ice }}>{b.d} mm</b> &nbsp;|&nbsp;
+                        外徑 OD = <b style={{ color: C.ice }}>{b.OD} mm</b> &nbsp;|&nbsp;
+                        總圈 Nt = <b style={{ color: C.ice }}>{b.Nt} 圈</b> (Na={b.Na})<br />
+                        自由長 L₀ = <b style={{ color: C.ice }}>{L0} mm</b> &nbsp;|&nbsp;
+                        k = <b style={{ color: C.gold }}>{b.k} N/mm</b> &nbsp;|&nbsp;
+                        SF = <b style={{ color: sfColor(b.SF) }}>{b.SF}</b>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </Card>
+          ) : (
+            <Card>
+              <SectionTitle icon="⚠">無可行螺旋彈簧設計</SectionTitle>
+              <div style={{ color: C.amber, fontFamily: "Courier New", fontSize: 12, lineHeight: 1.8, marginBottom: 18 }}>
+                當前 k 需求 = <b style={{ color: C.gold }}>{fmtK(res.kReq)} N/mm</b> ／
+                F = <b>{res.Fn.toFixed(0)} N</b> ／
+                可用 L₀ = {res.L0} mm ／ 最大 OD = {res.ODmax} mm<br />
+                在此限制下找不到合適的螺旋彈簧 — 建議考慮以下替代方案：
+              </div>
+
+              {res.alternatives.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {res.alternatives.map((alt, i) => {
+                    const fitColor = alt.fit === "ok" ? C.green : C.amber;
+                    return (
+                      <div key={i} style={{
+                        background: C.steel + "44",
+                        border: `1px solid ${fitColor}66`,
+                        borderLeft: `4px solid ${fitColor}`,
+                        borderRadius: 6, padding: "14px 18px",
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+                          <div>
+                            <span style={{ fontSize: 18, marginRight: 8 }}>{alt.icon}</span>
+                            <span style={{ color: C.text, fontFamily: "Georgia, serif", fontSize: 14, fontWeight: 700 }}>
+                              {alt.type}
+                            </span>
+                          </div>
+                          <span style={{
+                            background: fitColor + "22", border: `1px solid ${fitColor}`,
+                            color: fitColor, padding: "2px 10px", borderRadius: 3,
+                            fontFamily: "Courier New", fontSize: 10, letterSpacing: 1.5,
+                          }}>
+                            {alt.fit === "ok" ? "✓ 適合" : "⚠ 需評估"}
+                          </span>
+                        </div>
+
+                        <div style={{ color: C.ice, fontSize: 11.5, marginBottom: 10, lineHeight: 1.6, fontStyle: "italic" }}>
+                          💡 {alt.why}
+                        </div>
+
+                        <div style={{
+                          display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                          gap: "6px 16px", padding: "10px 12px", background: C.navy + "AA",
+                          borderRadius: 4, marginBottom: 8,
+                        }}>
+                          {alt.params.map(([k, v]) => (
+                            <div key={k} style={{ fontSize: 11, fontFamily: "Courier New" }}>
+                              <span style={{ color: C.dim }}>{k}：</span>
+                              <span style={{ color: C.text }}>{v}</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div style={{ color: fitColor, fontSize: 11, fontFamily: "Courier New", marginBottom: 4 }}>
+                          ▸ {alt.fitNote}
+                        </div>
+                        <div style={{ color: C.dim, fontSize: 10.5, lineHeight: 1.6 }}>
+                          {alt.note}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <div style={{
+                    marginTop: 6, padding: "10px 14px", background: C.navy,
+                    border: `1px dashed ${C.border}`, borderRadius: 6,
+                    color: C.dim, fontSize: 11, fontFamily: "Courier New", lineHeight: 1.8,
+                  }}>
+                    💬 <b style={{ color: C.ice }}>挑選邏輯</b><br />
+                    高 k（&gt; 500 N/mm）→ 優先碟形 ／ 中 k（5–300）→ 波形最省空間 ／
+                    超高 k → 多支並聯 ／ 設計可調 → 加大 δ 用回螺旋（最省成本）
+                  </div>
+                </div>
+              ) : (
+                <div style={{ color: C.dim, fontFamily: "Courier New", fontSize: 11.5, lineHeight: 1.8 }}>
+                  建議調整：加大自由長 L₀ ／ 放寬外徑限制 ／ 增加壓縮量 δ
+                </div>
+              )}
+            </Card>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODULE B: 線圈彈簧逆向計算
+// ════════════════════════════════════════════════════════════════════════════
+function SpringModule() {
+  const [d,   setD]   = useState(2.0);
+  const [D,   setDD]  = useState(12.0);
+  const [Na,  setNa]  = useState(8.0);
+  const [end, setEnd] = useState("閉合並磨平 (+2)");
+  const [mat, setMat] = useState("碳鋼琴鋼線 SWC");
+  const [L0,  setL0]  = useState(30.0);
+  const [Lw,  setLw]  = useState(20.0);
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+
+  const calc = () => {
+    const errors = [];
+    if (d <= 0)   errors.push("線徑 d 須 > 0");
+    if (D <= d)   errors.push("平均徑 D 須 > 線徑 d");
+    if (Na < 1)   errors.push("有效圈 Na 須 ≥ 1");
+    if (Lw >= L0) errors.push("工作長須 < 自由長");
+    if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
+    setErr("");
+
+    const matData = MAT_G[mat];
+    const Ne = END_COILS[end];
+    const Nt = Na + Ne;
+    const r  = calcSpring(d, D, Na, matData.G, L0, Lw);
+    const Sut      = matData.coeff * Math.pow(d, matData.exp);
+    const tauAllow = 0.45 * Sut;
+    const SF       = r.tau > 0 ? tauAllow / r.tau : Infinity;
+
+    setRes({ ...r, Sut, tauAllow, SF, Nt, Ls: Nt * d, Ne, mat, matData, L0, Lw, d, D, Na });
+  };
+
+  const row = { display: "flex", flexWrap: "wrap", gap: 20 };
+
+  return (
+    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+      {/* LEFT */}
+      <Card style={{ flex: "0 0 300px" }}>
+        <SectionTitle icon="📐">彈簧尺寸輸入</SectionTitle>
+        <div style={row}>
+          <Input label="線徑 d"    value={d}  onChange={setD}  step={0.1} unit="mm" />
+          <Input label="平均徑 D"  value={D}  onChange={setDD} step={0.5} unit="mm" />
+          <Input label="有效圈 Na" value={Na} onChange={setNa} step={0.5} unit="圈" />
+        </div>
+        <Select label="端部型式" value={end} onChange={setEnd} options={Object.keys(END_COILS)} />
+
+        <SectionTitle icon="🔧">材料 & 工作條件</SectionTitle>
+        <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
+        <div style={row}>
+          <Input label="自由長 L₀" value={L0} onChange={setL0} step={1} unit="mm" />
+          <Input label="工作長 Lw" value={Lw} onChange={setLw} step={1} unit="mm" />
+        </div>
+
+        {err && <div style={{ color: C.red, fontFamily: "Courier New", fontSize: 11, marginBottom: 10 }}>⚠ {err}</div>}
+        <CalcButton onClick={calc}>▶ 計算 k & F</CalcButton>
+      </Card>
+
+      {/* RIGHT */}
+      {res && (
+        <div style={{ flex: 1, minWidth: 340, display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Warnings */}
+          {res.Lw < res.Ls && (
+            <div style={{ padding: "10px 14px", background: C.red + "22", border: `1px solid ${C.red}`, borderRadius: 6, color: C.red, fontFamily: "Courier New", fontSize: 11 }}>
+              ⚠ 工作長 {res.Lw} mm &lt; 實體高 Ls = {fmt2(res.Ls)} mm — 彈簧已完全壓實！
+            </div>
+          )}
+          {res.C < 4 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 彈簧指數 C = {fmt2(res.C)} &lt; 4，接觸應力過高</div>}
+          {res.C > 12 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 彈簧指數 C = {fmt2(res.C)} &gt; 12，易挫曲</div>}
+
+          {/* KPI row */}
+          <Card>
+            <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+              <div>
+                <Label>彈簧常數 k</Label>
+                <div><Value big color={C.green}>{fmt3(res.k)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.k / 9.80665)} kgf/mm</div>
+              </div>
+              <div>
+                <Label>壓縮量 δ</Label>
+                <div><Value>{fmt2(res.delta)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>mm</span>
+                </div>
+              </div>
+              <div>
+                <Label>彈簧力 F</Label>
+                <div><Value big color={C.sky}>{fmt2(res.F)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.F / 9.80665)} kgf</div>
+              </div>
+              <div>
+                <Label>安全係數</Label>
+                <div style={{ marginTop: 4 }}><Badge sf={res.SF} /></div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Geometry + Spring diagram */}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 220 }}>
+              <SectionTitle icon="📐">幾何摘要</SectionTitle>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 20px" }}>
+                {[
+                  ["外徑 OD", fmt2(res.OD), "mm"],
+                  ["內徑 ID", fmt2(res.ID), "mm"],
+                  ["彈簧指數 C", fmt2(res.C), ""],
+                  ["Wahl Kw",  fmt3(res.Kw), ""],
+                  ["總圈數 Nt", res.Nt, "圈"],
+                  ["實體高 Ls", fmt2(res.Ls), "mm"],
+                  ["工作應力 τ", fmt1(res.tau), "MPa"],
+                  ["許用應力", fmt1(res.tauAllow), "MPa"],
+                ].map(([l, v, u]) => (
+                  <div key={l}>
+                    <Label>{l}</Label>
+                    <div>
+                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card style={{ flex: "0 0 180px" }}>
+              <SectionTitle icon="🔍">彈簧示意圖</SectionTitle>
+              <SpringDiagram
+                d={res.d} D={res.D} Na={res.Na}
+                L0={res.L0} Lw={res.Lw} OD={res.OD}
+                Ls={res.Ls} Ne={res.Ne}
+              />
+            </Card>
+          </div>
+
+          {/* Charts */}
+          <Card>
+            <SectionTitle icon="📈">簧力 vs 壓縮量</SectionTitle>
+            <ForceChart k={res.k} delta={res.delta} F={res.F} Ls={res.Ls} L0={res.L0} />
+          </Card>
+
+          <Card>
+            <SectionTitle icon="🔍">應力分析</SectionTitle>
+            <StressChart tau={res.tau} tauAllow={res.tauAllow} Sut={res.Sut} />
+          </Card>
+
+          {/* Vendor spec */}
+          <Card style={{ borderColor: C.gold + "66" }}>
+            <SectionTitle icon="📋">廠商規格摘要</SectionTitle>
+            <div style={{ fontFamily: "Courier New", fontSize: 11.5, color: C.text, lineHeight: 2 }}>
+              型式：壓縮螺旋彈簧，{end}<br />
+              材料：{mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
+              線徑 d ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.d} mm</span> ／
+              外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.OD)} mm</span> ／
+              內徑 ID ＝ {fmt2(res.ID)} mm<br />
+              自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>（實體高 Ls = {fmt2(res.Ls)} mm）<br />
+              總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {res.Na}）<br />
+              彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span><br />
+              工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODULE C: 碟形彈簧（Belleville）逆向計算
+// ════════════════════════════════════════════════════════════════════════════
+function BellevilleDiagram({ De, Di, t, h0, s = 0, nParallel = 1, nSeries = 1 }) {
+  const W = 200, H = 220;
+  // 比例縮放（最大寬度 160px）
+  const scale = Math.min(150 / De, 60 / (h0 + t));
+  const sDe = De * scale, sDi = Di * scale, st = t * scale, sh0 = h0 * scale;
+
+  const cx = W / 2;
+  const baseY = H - 40;
+  const xOut1 = cx - sDe / 2, xOut2 = cx + sDe / 2;
+  const xIn1  = cx - sDi / 2, xIn2  = cx + sDi / 2;
+
+  // 截面（梯形側視）：外緣在底部、內緣抬高 h0
+  // 上表面：從外邊（baseY - sh0/2）→ 內邊（baseY - sh0 - st）
+  // 下表面：從外邊（baseY - sh0/2 + st 約略）但簡化處理
+  // 直接畫兩側對稱的傾斜剖面：
+  const upperLeft  = `${xOut1},${baseY} ${xIn1},${baseY - sh0} ${xIn1 + Math.max(2, st * 0.5)},${baseY - sh0 - st * 0.7} ${xOut1 + Math.max(2, st * 0.5)},${baseY - st * 0.7}`;
+  const upperRight = `${xOut2},${baseY} ${xIn2},${baseY - sh0} ${xIn2 - Math.max(2, st * 0.5)},${baseY - sh0 - st * 0.7} ${xOut2 - Math.max(2, st * 0.5)},${baseY - st * 0.7}`;
+
+  return (
+    <svg width={W} height={H} style={{ display: "block", margin: "0 auto" }}>
+      {/* 中心軸 */}
+      <line x1={cx} y1={20} x2={cx} y2={H - 20}
+            stroke={C.dim} strokeDasharray="3,3" strokeWidth={0.7} opacity={0.6} />
+
+      {/* 碟形彈簧剖面（左右兩半） */}
+      <polygon points={upperLeft}  fill={C.sky} stroke={C.ice} strokeWidth={1} opacity={0.85} />
+      <polygon points={upperRight} fill={C.sky} stroke={C.ice} strokeWidth={1} opacity={0.85} />
+
+      {/* De 標註 */}
+      <line x1={xOut1} y1={baseY + 14} x2={xOut2} y2={baseY + 14}
+            stroke={C.ice} strokeWidth={1} markerStart="url(#arrB)" markerEnd="url(#arrB)" />
+      <text x={cx} y={baseY + 26} fill={C.ice} fontSize={9} fontFamily="Courier New" textAnchor="middle">
+        De = {De} mm
+      </text>
+
+      {/* Di 標註 */}
+      <line x1={xIn1} y1={baseY - sh0 - st - 8} x2={xIn2} y2={baseY - sh0 - st - 8}
+            stroke={C.gold} strokeWidth={1} markerStart="url(#arrG)" markerEnd="url(#arrG)" />
+      <text x={cx} y={baseY - sh0 - st - 14} fill={C.gold} fontSize={9} fontFamily="Courier New" textAnchor="middle">
+        Di = {Di}
+      </text>
+
+      {/* h0 標註（右側） */}
+      <line x1={xOut2 + 12} y1={baseY} x2={xOut2 + 12} y2={baseY - sh0}
+            stroke={C.red} strokeWidth={1} markerStart="url(#arrR)" markerEnd="url(#arrR)" />
+      <text x={xOut2 + 16} y={baseY - sh0 / 2 + 3} fill={C.red} fontSize={9} fontFamily="Courier New">
+        h₀={h0}
+      </text>
+
+      {/* t 標註（左側） */}
+      <text x={xOut1 - 6} y={baseY - 4} fill={C.green} fontSize={9} fontFamily="Courier New" textAnchor="end">
+        t={t}
+      </text>
+
+      {/* 堆疊資訊 */}
+      <text x={cx} y={16} fill={C.text} fontSize={10} fontFamily="Courier New" textAnchor="middle">
+        {nParallel} 並聯 × {nSeries} 串聯
+      </text>
+
+      <defs>
+        <marker id="arrB" markerWidth="5" markerHeight="5" refX="2.5" refY="2.5" orient="auto">
+          <path d="M0,0 L5,2.5 L0,5 Z" fill={C.ice} />
+        </marker>
+        <marker id="arrG" markerWidth="5" markerHeight="5" refX="2.5" refY="2.5" orient="auto">
+          <path d="M0,0 L5,2.5 L0,5 Z" fill={C.gold} />
+        </marker>
+        <marker id="arrR" markerWidth="5" markerHeight="5" refX="2.5" refY="2.5" orient="auto">
+          <path d="M0,0 L5,2.5 L0,5 Z" fill={C.red} />
+        </marker>
+      </defs>
+    </svg>
+  );
+}
+
+function BellevilleForceChart({ points, workingS, workingF, h0 }) {
+  const CustomDot = ({ cx, cy, payload }) => {
+    if (Math.abs(payload.x - workingS) > h0 * 0.018) return null;
+    return <circle cx={cx} cy={cy} r={6} fill={C.red} stroke="#fff" strokeWidth={2} />;
+  };
+
+  const TooltipContent = ({ active, payload }) => {
+    if (!active || !payload?.length) return null;
+    const { x, F } = payload[0].payload;
+    return (
+      <div style={{ background: C.navy, border: `1px solid ${C.border}`, padding: "8px 12px", borderRadius: 4, fontFamily: "Courier New", fontSize: 12 }}>
+        <div style={{ color: C.dim }}>s = <span style={{ color: C.text }}>{x} mm</span></div>
+        <div style={{ color: C.dim }}>F = <span style={{ color: C.ice }}>{F} N</span></div>
+      </div>
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={210}>
+      <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+        <XAxis dataKey="x" stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
+               label={{ value: "壓縮量 s (mm)", position: "insideBottomRight", offset: -4, fill: C.dim, fontSize: 10 }} />
+        <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
+               label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
+        <Tooltip content={<TooltipContent />} />
+        <ReferenceLine x={h0 * 0.75} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.2}
+                       label={{ value: "0.75·h₀ (疲勞極限)", fill: C.amber, fontSize: 8, position: "top" }} />
+        <ReferenceLine x={h0} stroke={C.red} strokeDasharray="4 3" strokeWidth={1.2}
+                       label={{ value: "h₀ (壓平)", fill: C.red, fontSize: 8, position: "top" }} />
+        <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
+              dot={<CustomDot />} activeDot={{ r: 4, fill: C.ice }} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
+function BellevilleModule() {
+  const [De,  setDe]  = useState(25);
+  const [Di,  setDi]  = useState(12.2);
+  const [t,   setT]   = useState(1.5);
+  const [h0,  setH0]  = useState(0.85);
+  const [s,   setS]   = useState(0.6);
+  const [mat, setMat] = useState("鉻釩鋼 SUP10");
+  const [nP,  setNP]  = useState(1);
+  const [nS,  setNS]  = useState(1);
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+
+  const calc = () => {
+    const errors = [];
+    if (De <= 0)     errors.push("外徑 De 須 > 0");
+    if (Di <= 0)     errors.push("內徑 Di 須 > 0");
+    if (De / Di < 1.5 || De / Di > 5)
+                     errors.push("De/Di 建議介於 1.5 ~ 5（典型 2.0）");
+    if (t <= 0)      errors.push("厚度 t 須 > 0");
+    if (h0 <= 0)     errors.push("錐高 h₀ 須 > 0");
+    if (s < 0 || s > h0 * 1.05)
+                     errors.push(`壓縮量 s 須介於 0 ~ ${h0} (h₀)`);
+    if (nP < 1)      errors.push("並聯片數 ≥ 1");
+    if (nS < 1)      errors.push("串聯組數 ≥ 1");
+    if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
+    setErr("");
+
+    const m  = MAT_G[mat];
+    const E  = m.E, nu = m.nu;
+    const r  = calcBelleville(De, Di, t, h0, s, E, nu);
+
+    // 堆疊：並聯 → 力 × n_P，行程不變；串聯 → 行程 × n_S，力不變
+    const F_stack     = r.F * nP;
+    const s_stack     = s * nS;
+    const k_stack     = (r.k_avg * nP) / nS;
+    const L0_stack    = (h0 + t) * nS;  // 自由高
+
+    // 簡化 SF 估算（使用平均強度 ~1500 MPa for spring steel）
+    const Sut_typ     = m.coeff * Math.pow(t, m.exp);
+    const sigma_allow = 0.85 * Sut_typ;   // Belleville 靜態許用
+    const SF          = r.sigma_OM > 0 ? sigma_allow / r.sigma_OM : Infinity;
+
+    setRes({
+      ...r, De, Di, t, h0, s, mat, E, nu, nP, nS,
+      F_stack, s_stack, k_stack, L0_stack,
+      Sut_typ, sigma_allow, SF, m,
+    });
+  };
+
+  const row = { display: "flex", flexWrap: "wrap", gap: 20 };
+
+  return (
+    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+      <Card style={{ flex: "0 0 300px" }}>
+        <SectionTitle icon="🔶">碟形彈簧尺寸</SectionTitle>
+        <div style={row}>
+          <Input label="外徑 De" value={De} onChange={setDe} step={0.5} unit="mm" />
+          <Input label="內徑 Di" value={Di} onChange={setDi} step={0.5} unit="mm" />
+          <Input label="厚度 t"  value={t}  onChange={setT}  step={0.1} unit="mm" />
+          <Input label="錐高 h₀" value={h0} onChange={setH0} step={0.1} unit="mm" />
+        </div>
+
+        <SectionTitle icon="🔧">工作條件</SectionTitle>
+        <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
+        <Input label="壓縮量 s" value={s} onChange={setS} step={0.1} unit="mm" />
+
+        <SectionTitle icon="🥞">疊合配置</SectionTitle>
+        <div style={row}>
+          <Input label="並聯片數 n_P" value={nP} onChange={v => setNP(Math.max(1, Math.round(v)))} step={1} min={1} unit="片" />
+          <Input label="串聯組數 n_S" value={nS} onChange={v => setNS(Math.max(1, Math.round(v)))} step={1} min={1} unit="組" />
+        </div>
+        <div style={{ color: C.dim, fontSize: 10.5, lineHeight: 1.7, marginTop: 4 }}>
+          並聯（同向）：力 × n_P，行程不變<br />
+          串聯（交錯）：行程 × n_S，力不變
+        </div>
+
+        {err && <div style={{ color: C.red, fontFamily: "Courier New", fontSize: 11, margin: "10px 0" }}>⚠ {err}</div>}
+        <div style={{ marginTop: 10 }}>
+          <CalcButton onClick={calc}>▶ 計算 k & F</CalcButton>
+        </div>
+      </Card>
+
+      {res && (
+        <div style={{ flex: 1, minWidth: 340, display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* 警告 */}
+          {res.h0_over_t > 1.414 && (
+            <div style={{ padding: "10px 14px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>
+              ⚠ h₀/t = {fmt2(res.h0_over_t)} &gt; 1.414，會出現負剛度區段（力先升後降），請確認設計意圖
+            </div>
+          )}
+          {res.s_over_h0 > 0.75 && (
+            <div style={{ padding: "10px 14px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>
+              ⚠ s/h₀ = {fmt2(res.s_over_h0)} &gt; 0.75，超過疲勞使用建議；靜態用可至 s = h₀
+            </div>
+          )}
+
+          {/* KPI */}
+          <Card>
+            <div style={{ display: "flex", gap: 28, flexWrap: "wrap" }}>
+              <div>
+                <Label>單片 F (s={res.s} mm)</Label>
+                <div><Value big color={C.sky}>{fmt1(res.F)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>N</span></div>
+              </div>
+              <div>
+                <Label>單片 k 平均</Label>
+                <div><Value color={C.green}>{fmt1(res.k_avg)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span></div>
+                <div style={{ color: C.dim, fontSize: 10 }}>初始 k₀ = {fmt1(res.k_init)}</div>
+              </div>
+              <div>
+                <Label>堆疊後 F</Label>
+                <div><Value big color={C.gold}>{fmt1(res.F_stack)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>N</span></div>
+                <div style={{ color: C.dim, fontSize: 10 }}>{fmt2(res.F_stack / 9.80665)} kgf</div>
+              </div>
+              <div>
+                <Label>堆疊後 k</Label>
+                <div><Value color={C.gold}>{fmt1(res.k_stack)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span></div>
+                <div style={{ color: C.dim, fontSize: 10 }}>行程 {fmt2(res.s_stack)} mm</div>
+              </div>
+              <div>
+                <Label>安全係數</Label>
+                <div style={{ marginTop: 4 }}><Badge sf={res.SF} /></div>
+              </div>
+            </div>
+          </Card>
+
+          {/* 幾何 + 示意圖 */}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <SectionTitle icon="📐">幾何與係數</SectionTitle>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 20px" }}>
+                {[
+                  ["徑比 De/Di",  fmt2(res.dRatio), ""],
+                  ["h₀/t 比",      fmt2(res.h0_over_t), ""],
+                  ["s/h₀ 比",      fmt2(res.s_over_h0), ""],
+                  ["DIN K₁",        fmt3(res.K1), ""],
+                  ["DIN K₂",        fmt3(res.K2), ""],
+                  ["DIN K₃",        fmt3(res.K3), ""],
+                  ["單片自由高 L₀", fmt2(h0 + t), "mm"],
+                  ["堆疊自由高",   fmt2(res.L0_stack), "mm"],
+                  ["最大應力 σ_OM", fmt1(res.sigma_OM), "MPa"],
+                  ["許用應力",     fmt1(res.sigma_allow), "MPa"],
+                ].map(([l, v, u]) => (
+                  <div key={l}>
+                    <Label>{l}</Label>
+                    <div>
+                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card style={{ flex: "0 0 220px" }}>
+              <SectionTitle icon="🔍">剖面示意</SectionTitle>
+              <BellevilleDiagram De={De} Di={Di} t={t} h0={h0} s={s} nParallel={res.nP} nSeries={res.nS} />
+            </Card>
+          </div>
+
+          {/* F-s 曲線（非線性） */}
+          <Card>
+            <SectionTitle icon="📈">力 / 壓縮量曲線（單片）</SectionTitle>
+            <BellevilleForceChart points={res.points} workingS={res.s} workingF={res.F} h0={res.h0} />
+            <div style={{ color: C.dim, fontSize: 10.5, marginTop: 6, fontFamily: "Courier New" }}>
+              ★ Belleville 的 F-s 非線性；當 h₀/t = √2 ≈ 1.414 時出現負剛度區
+            </div>
+          </Card>
+
+          {/* 廠商規格 */}
+          <Card style={{ borderColor: C.gold + "66" }}>
+            <SectionTitle icon="📋">廠商規格摘要</SectionTitle>
+            <div style={{ fontFamily: "Courier New", fontSize: 11.5, color: C.text, lineHeight: 2 }}>
+              型式：碟形彈簧（Belleville / Disc Spring，DIN 2093 規格）<br />
+              材料：{mat}（E = {res.E.toLocaleString()} MPa）<br />
+              外徑 De ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{De} mm</span> ／
+              內徑 Di ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{Di} mm</span> ／
+              厚度 t ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{t} mm</span><br />
+              錐高 h₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{h0} mm</span>（單片自由高 L₀ = {fmt2(h0 + t)} mm）<br />
+              疊合：<span style={{ color: C.ice, fontWeight: 700 }}>{res.nP} 並聯 × {res.nS} 串聯</span> ／ 堆疊自由高 {fmt2(res.L0_stack)} mm<br />
+              工作 s ＝ {res.s} mm → F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt1(res.F_stack)} N</span>（{fmt2(res.F_stack / 9.80665)} kgf）<br />
+              k_avg ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt1(res.k_stack)} N/mm</span>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODULE D: 波形彈簧（Wave Spring）逆向計算
+// ════════════════════════════════════════════════════════════════════════════
+function WaveDiagram({ OD, ID, N }) {
+  const W = 200, H = 200;
+  const cx = W / 2, cy = H / 2;
+  const scale = Math.min(75 / OD, 75 / OD);
+  const rOut = (OD / 2) * scale;
+  const rIn  = (ID / 2) * scale;
+
+  // 產生 N-wave 環狀波紋
+  const waveAmp = (rOut - rIn) * 0.25;
+  const outerPts = [], innerPts = [];
+  const seg = 200;
+  for (let i = 0; i <= seg; i++) {
+    const ang = (i / seg) * 2 * Math.PI;
+    const rO  = rOut + waveAmp * Math.sin(N * ang);
+    const rI  = rIn  - waveAmp * Math.sin(N * ang);
+    outerPts.push(`${cx + rO * Math.cos(ang)},${cy + rO * Math.sin(ang)}`);
+    innerPts.push(`${cx + rI * Math.cos(ang)},${cy + rI * Math.sin(ang)}`);
+  }
+  innerPts.reverse();
+
+  const pathD = "M " + outerPts.join(" L ") + " L " + innerPts.join(" L ") + " Z";
+
+  return (
+    <svg width={W} height={H} style={{ display: "block", margin: "0 auto" }}>
+      {/* 外圈虛線（OD） */}
+      <circle cx={cx} cy={cy} r={rOut + waveAmp} fill="none" stroke={C.dim} strokeDasharray="2,3" strokeWidth={0.7} opacity={0.5} />
+      <circle cx={cx} cy={cy} r={rIn  - waveAmp} fill="none" stroke={C.dim} strokeDasharray="2,3" strokeWidth={0.7} opacity={0.5} />
+
+      {/* 波紋環 */}
+      <path d={pathD} fill={C.sky} stroke={C.ice} strokeWidth={1} opacity={0.85} fillRule="evenodd" />
+
+      {/* 中心點 */}
+      <circle cx={cx} cy={cy} r={2} fill={C.gold} />
+
+      {/* 標註 */}
+      <text x={cx} y={16} fill={C.ice} fontSize={10} fontFamily="Courier New" textAnchor="middle">
+        {N} 波（單圈頂峰數）
+      </text>
+      <text x={cx} y={H - 24} fill={C.ice} fontSize={9} fontFamily="Courier New" textAnchor="middle">
+        OD = {OD} mm
+      </text>
+      <text x={cx} y={H - 10} fill={C.gold} fontSize={9} fontFamily="Courier New" textAnchor="middle">
+        ID = {ID} mm
+      </text>
+    </svg>
+  );
+}
+
+function WaveModule() {
+  const [OD,  setOD]  = useState(40);
+  const [ID,  setID]  = useState(28);
+  const [t,   setT]   = useState(0.4);
+  const [N,   setN]   = useState(4);
+  const [n,   setN_]  = useState(3);
+  const [H0,  setH0w] = useState(10);
+  const [Hw,  setHw]  = useState(7);
+  const [mat, setMat] = useState("不鏽鋼 SUS304");
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+
+  const calc = () => {
+    const errors = [];
+    if (OD <= ID)    errors.push("外徑必須 > 內徑");
+    if (t <= 0)      errors.push("厚度 t 須 > 0");
+    if (N < 2)       errors.push("每圈波數 N 須 ≥ 2");
+    if (n < 1)       errors.push("圈數 n 須 ≥ 1");
+    if (Hw >= H0)    errors.push("工作高度須 < 自由高度");
+    if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
+    setErr("");
+
+    const m = MAT_G[mat];
+    const s = H0 - Hw;
+    const r = calcWave(OD, ID, t, N, n, s, m.E);
+
+    const Sut_typ     = m.coeff * Math.pow(t, m.exp);
+    const sigma_allow = 0.55 * Sut_typ;   // 波形彈簧靜態許用
+    const SF          = r.sigma > 0 ? sigma_allow / r.sigma : Infinity;
+
+    setRes({ ...r, OD, ID, t, N, n, H0, Hw, s, mat, m, Sut_typ, sigma_allow, SF });
+  };
+
+  const row = { display: "flex", flexWrap: "wrap", gap: 20 };
+
+  return (
+    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+      <Card style={{ flex: "0 0 300px" }}>
+        <SectionTitle icon="🌊">波形彈簧尺寸</SectionTitle>
+        <div style={row}>
+          <Input label="外徑 OD" value={OD} onChange={setOD} step={1} unit="mm" />
+          <Input label="內徑 ID" value={ID} onChange={setID} step={1} unit="mm" />
+          <Input label="厚度 t"  value={t}  onChange={setT}  step={0.05} unit="mm" />
+        </div>
+        <div style={row}>
+          <Input label="每圈波數 N" value={N} onChange={v => setN(Math.max(2, Math.round(v)))} step={1} min={2} unit="波" />
+          <Input label="圈數 n"      value={n} onChange={v => setN_(Math.max(1, Math.round(v)))} step={1} min={1} unit="圈" />
+        </div>
+        <div style={{ color: C.dim, fontSize: 10.5, lineHeight: 1.7, marginBottom: 10 }}>
+          ※ 多圈 crest-to-crest 型式。典型 N=3~8、n=1~10
+        </div>
+
+        <SectionTitle icon="🔧">材料 & 工作條件</SectionTitle>
+        <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
+        <div style={row}>
+          <Input label="自由高 H₀" value={H0} onChange={setH0w} step={0.5} unit="mm" />
+          <Input label="工作高 Hw" value={Hw} onChange={setHw}  step={0.5} unit="mm" />
+        </div>
+
+        {err && <div style={{ color: C.red, fontFamily: "Courier New", fontSize: 11, margin: "10px 0" }}>⚠ {err}</div>}
+        <CalcButton onClick={calc}>▶ 計算 k & F</CalcButton>
+      </Card>
+
+      {res && (
+        <div style={{ flex: 1, minWidth: 340, display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* 警告 */}
+          {res.s > (res.H0 - res.n * res.t) * 0.8 && (
+            <div style={{ padding: "10px 14px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>
+              ⚠ 壓縮量 s = {fmt2(res.s)} mm 已接近實體高（n × t = {fmt2(res.n * res.t)} mm），請增加 H₀ 或減少圈數
+            </div>
+          )}
+
+          {/* KPI */}
+          <Card>
+            <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+              <div>
+                <Label>彈簧常數 k</Label>
+                <div><Value big color={C.green}>{fmt2(res.k)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span></div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.k / 9.80665)} kgf/mm</div>
+              </div>
+              <div>
+                <Label>壓縮量 s</Label>
+                <div><Value>{fmt2(res.s)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>mm</span></div>
+                <div style={{ color: C.dim, fontSize: 11 }}>H₀ − Hw</div>
+              </div>
+              <div>
+                <Label>彈簧力 F</Label>
+                <div><Value big color={C.sky}>{fmt1(res.F)}</Value><span style={{ color: C.dim, marginLeft: 6 }}>N</span></div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt2(res.F / 9.80665)} kgf</div>
+              </div>
+              <div>
+                <Label>安全係數</Label>
+                <div style={{ marginTop: 4 }}><Badge sf={res.SF} /></div>
+              </div>
+            </div>
+          </Card>
+
+          {/* 幾何 + 示意圖 */}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <SectionTitle icon="📐">幾何摘要</SectionTitle>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 20px" }}>
+                {[
+                  ["平均徑 Dm",     fmt2(res.Dm), "mm"],
+                  ["徑向寬 b",      fmt2(res.b),  "mm"],
+                  ["材料厚 t",      res.t, "mm"],
+                  ["波數 / 圈數",   `${res.N} / ${res.n}`, ""],
+                  ["實體高 (n×t)",  fmt2(res.n * res.t), "mm"],
+                  ["工作應力 σ",    fmt1(res.sigma), "MPa"],
+                  ["許用應力",      fmt1(res.sigma_allow), "MPa"],
+                  ["Sut (估算)",    fmt1(res.Sut_typ), "MPa"],
+                ].map(([l, v, u]) => (
+                  <div key={l}>
+                    <Label>{l}</Label>
+                    <div>
+                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card style={{ flex: "0 0 220px" }}>
+              <SectionTitle icon="🔍">頂視示意</SectionTitle>
+              <WaveDiagram OD={OD} ID={ID} N={N} />
+            </Card>
+          </div>
+
+          {/* F vs s 線性 */}
+          <Card>
+            <SectionTitle icon="📈">力 vs 壓縮量</SectionTitle>
+            <ForceChart k={res.k} delta={res.s} F={res.F} Ls={res.n * res.t} L0={res.H0} />
+          </Card>
+
+          {/* 應力 */}
+          <Card>
+            <SectionTitle icon="🔍">應力分析</SectionTitle>
+            <StressChart tau={res.sigma} tauAllow={res.sigma_allow} Sut={res.Sut_typ} />
+          </Card>
+
+          {/* 廠商規格 */}
+          <Card style={{ borderColor: C.gold + "66" }}>
+            <SectionTitle icon="📋">廠商規格摘要</SectionTitle>
+            <div style={{ fontFamily: "Courier New", fontSize: 11.5, color: C.text, lineHeight: 2 }}>
+              型式：波形彈簧（Wave Spring，Crest-to-crest 多圈型式）<br />
+              材料：{mat}（E = {res.m.E.toLocaleString()} MPa）<br />
+              外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.OD} mm</span> ／
+              內徑 ID ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.ID} mm</span> ／
+              徑向寬 b ＝ {fmt2(res.b)} mm<br />
+              材料厚 t ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.t} mm</span> ／
+              每圈波數 N ＝ <b style={{ color: C.ice }}>{res.N}</b> ／
+              圈數 n ＝ <b style={{ color: C.ice }}>{res.n}</b><br />
+              自由高 H₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.H0} mm</span>（實體高 {fmt2(res.n * res.t)} mm）<br />
+              彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt2(res.k)} N/mm</span><br />
+              工作行程 s ＝ {fmt2(res.s)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt1(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROOT
+// ════════════════════════════════════════════════════════════════════════════
+function App() {
+  const [tab, setTab] = useState("screw");
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.navy, color: C.text, padding: "0 0 40px" }}>
+      {/* Header */}
+      <div style={{
+        background: `linear-gradient(135deg, ${C.panel} 0%, ${C.steel} 100%)`,
+        borderBottom: `1px solid ${C.border}`,
+        padding: "24px 32px 20px",
+        marginBottom: 24,
+      }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 26, fontFamily: "Georgia, serif", color: C.text, letterSpacing: 1 }}>
+            🔩 Spring Screw
+          </span>
+          <span style={{ fontFamily: "Courier New", fontSize: 11, color: C.sky, letterSpacing: 3, borderLeft: `1px solid ${C.border}`, paddingLeft: 14 }}>
+            CALCULATOR v3.0
+          </span>
+        </div>
+        <div style={{ marginTop: 6, fontFamily: "Courier New", fontSize: 11, color: C.dim }}>
+          螺絲軸力 × 彈簧選型 × k 值逆算 × 應力驗證 × 廠商規格輸出
+        </div>
+      </div>
+
+      <div style={{ padding: "0 24px" }}>
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+          <Tab label="🔩 螺絲軸力 & 彈簧選型" active={tab === "screw"} onClick={() => setTab("screw")} />
+          <Tab label="🌀 線圈彈簧 k & 簧力計算" active={tab === "spring"} onClick={() => setTab("spring")} />
+          <Tab label="🔶 碟形彈簧 Belleville"  active={tab === "belleville"} onClick={() => setTab("belleville")} />
+          <Tab label="🌊 波形彈簧 Wave Spring"  active={tab === "wave"} onClick={() => setTab("wave")} />
+        </div>
+
+        {tab === "screw"      && <ScrewModule />}
+        {tab === "spring"     && <SpringModule />}
+        {tab === "belleville" && <BellevilleModule />}
+        {tab === "wave"       && <WaveModule />}
+      </div>
+    </div>
+  );
+}
+
+
+    createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
