@@ -811,6 +811,7 @@ function ScrewModule() {
 // MODULE B: 線圈彈簧逆向計算
 // ════════════════════════════════════════════════════════════════════════════
 function SpringModule() {
+  // ── 彈簧 A（也是預設單支模式的彈簧）─────────────────────────────────────
   const [d,   setD]   = useState(2.0);
   const [D,   setDD]  = useState(12.0);
   const [Na,  setNa]  = useState(8.0);
@@ -818,8 +819,27 @@ function SpringModule() {
   const [mat, setMat] = useState("碳鋼琴鋼線 SWC");
   const [L0,  setL0]  = useState(30.0);
   const [Lw,  setLw]  = useState(20.0);
+  // ── 並聯 / 串聯 配置 ───────────────────────────────────────────────────
+  const [par, setPar] = useState(false);
+  const [nP,  setNp]  = useState(2);
+  const [ser, setSer] = useState(false);
+  const [nS,  setNs]  = useState(2);
+  // ── 混搭串聯（兩支不同規格）── 與 ser 互斥 ─────────────────────────────
+  const [mix,  setMix]  = useState(false);
+  const [dB,   setDB]   = useState(2.5);
+  const [DDB,  setDDB]  = useState(15.0);
+  const [NaB,  setNaB]  = useState(6.0);
+  const [endB, setEndB] = useState("閉合並磨平 (+2)");
+  const [matB, setMatB] = useState("不鏽鋼 SUS304");
+  const [L0B,  setL0B]  = useState(25.0);
+  const [LwB,  setLwB]  = useState(18.0);
+
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
+
+  // 勾選互斥：開混搭就關同規格串聯，反之亦然
+  const onToggleMix = (v) => { setMix(v); if (v) setSer(false); };
+  const onToggleSer = (v) => { setSer(v); if (v) setMix(false); };
 
   const calc = () => {
     const errors = [];
@@ -827,6 +847,14 @@ function SpringModule() {
     if (D <= d)   errors.push("平均徑 D 須 > 線徑 d");
     if (Na < 1)   errors.push("有效圈 Na 須 ≥ 1");
     if (Lw >= L0) errors.push("工作長須 < 自由長");
+    if (par && nP < 2) errors.push("並聯支數須 ≥ 2");
+    if (ser && nS < 2) errors.push("串聯支數須 ≥ 2");
+    if (mix) {
+      if (dB <= 0)    errors.push("彈簧 B：線徑 d 須 > 0");
+      if (DDB <= dB)  errors.push("彈簧 B：平均徑 D 須 > 線徑 d");
+      if (NaB < 1)    errors.push("彈簧 B：有效圈 Na 須 ≥ 1");
+      if (LwB >= L0B) errors.push("彈簧 B：工作長須 < 自由長");
+    }
     if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
     setErr("");
 
@@ -838,7 +866,73 @@ function SpringModule() {
     const tauAllow = 0.45 * Sut;
     const SF       = r.tau > 0 ? tauAllow / r.tau : Infinity;
 
-    setRes({ ...r, Sut, tauAllow, SF, Nt, Ls: Nt * d, Ne, mat, matData, L0, Lw, d, D, Na });
+    // ── 混搭模式：計算彈簧 B ───────────────────────────────────────────
+    let bSpring = null;
+    if (mix) {
+      const matDataB = MAT_G[matB];
+      const NeB = END_COILS[endB];
+      const NtB = NaB + NeB;
+      const rB  = calcSpring(dB, DDB, NaB, matDataB.G, L0B, LwB);
+      const SutB      = matDataB.coeff * Math.pow(dB, matDataB.exp);
+      const tauAllowB = 0.45 * SutB;
+      const SFB       = rB.tau > 0 ? tauAllowB / rB.tau : Infinity;
+      bSpring = {
+        ...rB, Sut: SutB, tauAllow: tauAllowB, SF: SFB,
+        Nt: NtB, Ls: NtB * dB, Ne: NeB, mat: matB, matData: matDataB,
+        L0: L0B, Lw: LwB, d: dB, D: DDB, Na: NaB, end: endB,
+      };
+    }
+
+    // ── 系統 k / F / δ 計算 ────────────────────────────────────────────
+    const n_par = par ? nP : 1;
+    let k_system, F_system, delta_system, L0_system, Lw_system;
+
+    if (mix) {
+      // 混搭串聯（兩支不同）：1/k = 1/k_A + 1/k_B
+      const k_chain = (r.k * bSpring.k) / (r.k + bSpring.k);
+      k_system     = k_chain * n_par;
+      delta_system = r.delta + bSpring.delta;          // 總壓縮
+      // 系統承受 F：實務上必須 F_A = F_B。取平均並標記差異
+      const F_avg = (r.F + bSpring.F) / 2;
+      F_system    = F_avg * n_par;
+      L0_system   = (L0 + L0B);                        // 串聯堆疊
+      Lw_system   = (Lw + LwB);
+    } else if (ser) {
+      // 同規格串聯
+      const k_chain = r.k / nS;
+      k_system     = k_chain * n_par;
+      delta_system = r.delta * nS;
+      F_system     = r.F * n_par;
+      L0_system    = L0 * nS;
+      Lw_system    = Lw * nS;
+    } else {
+      // 只有並聯或單支
+      k_system     = r.k * n_par;
+      delta_system = r.delta;
+      F_system     = r.F * n_par;
+      L0_system    = L0;
+      Lw_system    = Lw;
+    }
+
+    // F 不平衡警告（混搭）
+    let mixWarning = null;
+    if (mix && bSpring) {
+      const diff = Math.abs(r.F - bSpring.F);
+      const avg  = (r.F + bSpring.F) / 2;
+      const pct  = avg > 0 ? diff / avg * 100 : 0;
+      if (pct > 5) {
+        mixWarning = `兩支彈簧承受力差異 ${pct.toFixed(1)}% (F_A=${fmt2(r.F)}N, F_B=${fmt2(bSpring.F)}N)。實際串聯時 F 必須相等，請調整其中一支的 Lw 直到 F 接近。`;
+      }
+    }
+
+    setRes({
+      ...r, Sut, tauAllow, SF, Nt, Ls: Nt * d, Ne, mat, matData, L0, Lw, d, D, Na, end,
+      par, ser, mix, nP: n_par, nS: ser ? nS : (mix ? 2 : 1),
+      k_total: k_system, F_total: F_system,
+      delta_total: delta_system, L0_total: L0_system, Lw_total: Lw_system,
+      F_perUnit: r.F,
+      bSpring, mixWarning,
+    });
   };
 
   const row = { display: "flex", flexWrap: "wrap", gap: 20 };
@@ -847,7 +941,7 @@ function SpringModule() {
     <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
       {/* LEFT */}
       <Card style={{ flex: "0 0 300px" }}>
-        <SectionTitle icon="📐">彈簧尺寸輸入</SectionTitle>
+        <SectionTitle icon="📐">{mix ? "彈簧 A 尺寸輸入" : "彈簧尺寸輸入"}</SectionTitle>
         <div style={row}>
           <Input label="線徑 d"    value={d}  onChange={setD}  step={0.1} unit="mm" />
           <Input label="平均徑 D"  value={D}  onChange={setDD} step={0.5} unit="mm" />
@@ -855,12 +949,101 @@ function SpringModule() {
         </div>
         <Select label="端部型式" value={end} onChange={setEnd} options={Object.keys(END_COILS)} />
 
-        <SectionTitle icon="🔧">材料 & 工作條件</SectionTitle>
+        <SectionTitle icon="🔧">{mix ? "彈簧 A 材料 & 工作條件" : "材料 & 工作條件"}</SectionTitle>
         <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
         <div style={row}>
           <Input label="自由長 L₀" value={L0} onChange={setL0} step={1} unit="mm" />
           <Input label="工作長 Lw" value={Lw} onChange={setLw} step={1} unit="mm" />
         </div>
+
+        <SectionTitle icon="🔗">並聯 / 串聯 / 混搭設定（選用）</SectionTitle>
+        <label style={{
+          display: "flex", alignItems: "center", gap: 8, marginBottom: 8, cursor: "pointer",
+          color: par ? C.gold : C.dim, fontFamily: "Courier New", fontSize: 12,
+        }}>
+          <input
+            type="checkbox" checked={par} onChange={e => setPar(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: C.gold, cursor: "pointer" }}
+          />
+          啟用並聯計算（n 支並排，共用 δ）
+        </label>
+        {par && (
+          <div style={{ paddingLeft: 22, marginBottom: 8 }}>
+            <Input label="並聯支數 nP" value={nP} onChange={v => setNp(Math.max(2, Math.round(v)))} step={1} min={2} unit="支" />
+          </div>
+        )}
+
+        <label style={{
+          display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+          cursor: mix ? "not-allowed" : "pointer", opacity: mix ? 0.4 : 1,
+          color: ser ? C.amber : C.dim, fontFamily: "Courier New", fontSize: 12,
+        }}>
+          <input
+            type="checkbox" checked={ser} disabled={mix}
+            onChange={e => onToggleSer(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: C.amber, cursor: mix ? "not-allowed" : "pointer" }}
+          />
+          啟用串聯計算（n 支同規格首尾相接）
+        </label>
+        {ser && (
+          <div style={{ paddingLeft: 22, marginBottom: 8 }}>
+            <Input label="串聯支數 nS" value={nS} onChange={v => setNs(Math.max(2, Math.round(v)))} step={1} min={2} unit="支" />
+          </div>
+        )}
+
+        <label style={{
+          display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+          cursor: ser ? "not-allowed" : "pointer", opacity: ser ? 0.4 : 1,
+          color: mix ? C.red : C.dim, fontFamily: "Courier New", fontSize: 12,
+        }}>
+          <input
+            type="checkbox" checked={mix} disabled={ser}
+            onChange={e => onToggleMix(e.target.checked)}
+            style={{ width: 16, height: 16, accentColor: C.red, cursor: ser ? "not-allowed" : "pointer" }}
+          />
+          啟用混搭串聯（兩支不同規格）
+        </label>
+
+        {(par || ser || mix) && (
+          <div style={{
+            color: C.dim, fontSize: 10.5, fontFamily: "Courier New",
+            marginTop: 6, marginBottom: 10, lineHeight: 1.7,
+            background: C.border + "40", padding: "8px 10px", borderRadius: 4,
+          }}>
+            並聯：k_total = nP × k　／ F_total = nP × F　／ δ 不變<br />
+            串聯：k_total = k / nS　／ F 不變　／ δ_total = nS × δ<br />
+            混搭：1/k = 1/k_A + 1/k_B　／ F_A = F_B（必須相等）<br />
+            <span style={{ color: C.amber }}>※ 串聯與混搭擇一使用</span>
+          </div>
+        )}
+
+        {/* 彈簧 B（僅混搭模式顯示）*/}
+        {mix && (
+          <>
+            <div style={{
+              marginTop: 14, marginBottom: 6,
+              padding: "8px 12px", background: C.red + "22",
+              borderLeft: `3px solid ${C.red}`, borderRadius: 4, color: C.red,
+              fontFamily: "Courier New", fontSize: 11.5, letterSpacing: 1, fontWeight: 700,
+            }}>
+              ▼ 彈簧 B 規格
+            </div>
+            <SectionTitle icon="📐">彈簧 B 尺寸輸入</SectionTitle>
+            <div style={row}>
+              <Input label="線徑 d"    value={dB}  onChange={setDB}  step={0.1} unit="mm" />
+              <Input label="平均徑 D"  value={DDB} onChange={setDDB} step={0.5} unit="mm" />
+              <Input label="有效圈 Na" value={NaB} onChange={setNaB} step={0.5} unit="圈" />
+            </div>
+            <Select label="端部型式" value={endB} onChange={setEndB} options={Object.keys(END_COILS)} />
+
+            <SectionTitle icon="🔧">彈簧 B 材料 & 工作條件</SectionTitle>
+            <Select label="材料" value={matB} onChange={setMatB} options={Object.keys(MAT_G)} />
+            <div style={row}>
+              <Input label="自由長 L₀" value={L0B} onChange={setL0B} step={1} unit="mm" />
+              <Input label="工作長 Lw" value={LwB} onChange={setLwB} step={1} unit="mm" />
+            </div>
+          </>
+        )}
 
         {err && <div style={{ color: C.red, fontFamily: "Courier New", fontSize: 11, marginBottom: 10 }}>⚠ {err}</div>}
         <CalcButton onClick={calc}>▶ 計算 k & F</CalcButton>
@@ -878,32 +1061,134 @@ function SpringModule() {
           {res.C < 4 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 彈簧指數 C = {fmt2(res.C)} &lt; 4，接觸應力過高</div>}
           {res.C > 12 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 彈簧指數 C = {fmt2(res.C)} &gt; 12，易挫曲</div>}
 
+          {/* Configuration banner */}
+          {(res.par || res.ser || res.mix) && (
+            <Card style={{
+              background: (res.mix ? C.red : res.par ? C.gold : C.amber) + "12",
+              borderColor: (res.mix ? C.red : res.par ? C.gold : C.amber) + "66",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontFamily: "Courier New", fontSize: 12 }}>
+                {res.par && (
+                  <span style={{
+                    background: C.gold, color: C.navy, fontWeight: 700, fontSize: 11,
+                    padding: "3px 10px", borderRadius: 4, letterSpacing: 2,
+                  }}>PARALLEL × {res.nP}</span>
+                )}
+                {res.ser && (
+                  <span style={{
+                    background: C.amber, color: C.navy, fontWeight: 700, fontSize: 11,
+                    padding: "3px 10px", borderRadius: 4, letterSpacing: 2,
+                  }}>SERIES × {res.nS}</span>
+                )}
+                {res.mix && (
+                  <span style={{
+                    background: C.red, color: "#fff", fontWeight: 700, fontSize: 11,
+                    padding: "3px 10px", borderRadius: 4, letterSpacing: 2,
+                  }}>MIXED SERIES (A + B)</span>
+                )}
+                <span style={{ color: C.text }}>
+                  {res.mix
+                    ? `A + B 串聯${res.par ? `，並聯 × ${res.nP} 組` : ""}`
+                    : <>共 {res.nP * res.nS} 支同規格彈簧
+                        {res.par && res.ser && "（" + res.nP + " 並 × " + res.nS + " 串）"}</>}
+                </span>
+              </div>
+            </Card>
+          )}
+
+          {/* Mix mode: F mismatch warning */}
+          {res.mix && res.mixWarning && (
+            <div style={{
+              padding: "10px 14px", background: C.red + "22",
+              border: `1px solid ${C.red}`, borderRadius: 6, color: C.red,
+              fontFamily: "Courier New", fontSize: 11, lineHeight: 1.6,
+            }}>
+              ⚠ {res.mixWarning}
+            </div>
+          )}
+
+          {/* Mix mode: per-spring breakdown */}
+          {res.mix && res.bSpring && (
+            <Card>
+              <SectionTitle icon="🌀">每支彈簧明細</SectionTitle>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 14 }}>
+                {[
+                  { tag: "A", color: C.sky,  data: res },
+                  { tag: "B", color: C.red,  data: res.bSpring },
+                ].map(({ tag, color, data }) => (
+                  <div key={tag} style={{
+                    border: `1px solid ${color}66`,
+                    borderRadius: 6, padding: 12,
+                    background: color + "08",
+                  }}>
+                    <div style={{
+                      display: "inline-block", background: color, color: "#fff",
+                      padding: "2px 10px", borderRadius: 3, fontFamily: "Courier New",
+                      fontSize: 11, fontWeight: 700, letterSpacing: 2, marginBottom: 8,
+                    }}>
+                      彈簧 {tag}
+                    </div>
+                    <div style={{ fontFamily: "Courier New", fontSize: 11, lineHeight: 1.9, color: C.text }}>
+                      材料：{data.mat}<br />
+                      d = {data.d} mm　／ D = {data.D} mm　／ Na = {data.Na} 圈<br />
+                      L₀ = {data.L0} mm　／ Lw = {data.Lw} mm<br />
+                      k = <span style={{ color: C.green, fontWeight: 700 }}>{fmt3(data.k)}</span> N/mm　／
+                      δ = <span style={{ color: color, fontWeight: 700 }}>{fmt2(data.delta)}</span> mm<br />
+                      F = <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(data.F)}</span> N　／
+                      SF = <span style={{ color: sfColor(data.SF), fontWeight: 700 }}>{fmt2(data.SF)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
           {/* KPI row */}
           <Card>
             <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
               <div>
-                <Label>彈簧常數 k</Label>
-                <div><Value big color={C.green}>{fmt3(res.k)}</Value>
+                <Label>{(res.par || res.ser || res.mix) ? `系統 k_total` : `彈簧常數 k`}</Label>
+                <div>
+                  <Value big color={C.green}>{fmt3(res.k_total)}</Value>
                   <span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span>
                 </div>
-                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.k / 9.80665)} kgf/mm</div>
+                {res.mix
+                  ? <div style={{ color: C.dim, fontSize: 11 }}>1/k = 1/{fmt3(res.k)} + 1/{fmt3(res.bSpring.k)}{res.par && ` × ${res.nP}`}</div>
+                  : (res.par || res.ser)
+                    ? <div style={{ color: C.dim, fontSize: 11 }}>
+                        單支 k = {fmt3(res.k)}
+                        {res.par && ` × ${res.nP}`}
+                        {res.ser && ` ÷ ${res.nS}`}
+                      </div>
+                    : <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.k / 9.80665)} kgf/mm</div>}
               </div>
               <div>
-                <Label>壓縮量 δ</Label>
-                <div><Value>{fmt2(res.delta)}</Value>
+                <Label>{(res.ser || res.mix) ? `系統壓縮量 δ_total` : `壓縮量 δ`}</Label>
+                <div><Value>{fmt2(res.delta_total)}</Value>
                   <span style={{ color: C.dim, marginLeft: 6 }}>mm</span>
                 </div>
+                {res.mix && <div style={{ color: C.dim, fontSize: 11 }}>δ_A {fmt2(res.delta)} + δ_B {fmt2(res.bSpring.delta)}</div>}
+                {res.ser && <div style={{ color: C.dim, fontSize: 11 }}>每支 δ = {fmt2(res.delta)} × {res.nS}</div>}
+                {res.par && !res.ser && !res.mix && <div style={{ color: C.dim, fontSize: 11 }}>所有彈簧共用</div>}
               </div>
               <div>
-                <Label>彈簧力 F</Label>
-                <div><Value big color={C.sky}>{fmt2(res.F)}</Value>
+                <Label>{res.par ? `系統 F_total` : (res.mix || res.ser) ? `系統 F` : `彈簧力 F`}</Label>
+                <div>
+                  <Value big color={C.sky}>{fmt2(res.F_total)}</Value>
                   <span style={{ color: C.dim, marginLeft: 6 }}>N</span>
                 </div>
-                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.F / 9.80665)} kgf</div>
+                {res.par
+                  ? <div style={{ color: C.dim, fontSize: 11 }}>每支 F = {fmt2(res.F_perUnit)} N × {res.nP}</div>
+                  : res.mix
+                    ? <div style={{ color: C.dim, fontSize: 11 }}>取 (F_A + F_B) / 2</div>
+                    : res.ser
+                      ? <div style={{ color: C.dim, fontSize: 11 }}>每支共同承擔 = {fmt2(res.F)} N</div>
+                      : <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.F / 9.80665)} kgf</div>}
               </div>
               <div>
-                <Label>安全係數</Label>
+                <Label>{res.mix ? "SF (彈簧 A)" : (res.par || res.ser) ? "安全係數（每支）" : "安全係數"}</Label>
                 <div style={{ marginTop: 4 }}><Badge sf={res.SF} /></div>
+                {res.mix && <div style={{ color: C.dim, fontSize: 10, marginTop: 4 }}>彈簧 B SF = {fmt2(res.bSpring.SF)}</div>}
               </div>
             </div>
           </Card>
@@ -946,8 +1231,22 @@ function SpringModule() {
 
           {/* Charts */}
           <Card>
-            <SectionTitle icon="📈">簧力 vs 壓縮量</SectionTitle>
-            <ForceChart k={res.k} delta={res.delta} F={res.F} Ls={res.Ls} L0={res.L0} />
+            <SectionTitle icon="📈">{(res.par || res.ser || res.mix) ? "系統 F vs 系統 δ" : "簧力 vs 壓縮量"}</SectionTitle>
+            <ForceChart
+              k={res.k_total}
+              delta={(res.ser || res.mix) ? res.delta_total : res.delta}
+              F={res.F_total}
+              Ls={res.mix ? (res.Ls + res.bSpring.Ls) : res.Ls * res.nS}
+              L0={res.L0_total}
+            />
+            {(res.par || res.ser || res.mix) && (
+              <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", marginTop: 6, textAlign: "right" }}>
+                {res.par && `並聯 ×${res.nP} 使曲線斜率變陡 ${res.nP} 倍 `}
+                {res.par && res.ser && "／ "}
+                {res.ser && `串聯 ×${res.nS} 使行程延長為 ${res.nS} 倍`}
+                {res.mix && `混搭串聯：A + B 組合，系統 k 由兩支共同決定`}
+              </div>
+            )}
           </Card>
 
           <Card>
@@ -959,15 +1258,64 @@ function SpringModule() {
           <Card style={{ borderColor: C.gold + "66" }}>
             <SectionTitle icon="📋">廠商規格摘要</SectionTitle>
             <div style={{ fontFamily: "Courier New", fontSize: 11.5, color: C.text, lineHeight: 2 }}>
-              型式：壓縮螺旋彈簧，{end}<br />
-              材料：{mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
-              線徑 d ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.d} mm</span> ／
-              外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.OD)} mm</span> ／
-              內徑 ID ＝ {fmt2(res.ID)} mm<br />
-              自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>（實體高 Ls = {fmt2(res.Ls)} mm）<br />
-              總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {res.Na}）<br />
-              彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span><br />
-              工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+              {res.mix ? (
+                <>
+                  <div style={{ color: C.red, fontWeight: 700, marginBottom: 4 }}>
+                    型式：混搭串聯（A + B）{res.par && <span style={{ color: C.gold }}>　|　{res.nP} 組並聯</span>}
+                  </div>
+                  <div style={{ background: C.sky + "10", padding: "6px 10px", borderLeft: `2px solid ${C.sky}`, borderRadius: 3, marginBottom: 6 }}>
+                    <b style={{ color: C.sky }}>彈簧 A</b>　|　壓縮螺旋彈簧，{res.end}<br />
+                    　材料：{res.mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
+                    　d = <b style={{ color: C.ice }}>{res.d} mm</b>　/ OD = <b style={{ color: C.ice }}>{fmt2(res.OD)} mm</b>　/ Na = <b style={{ color: C.ice }}>{res.Na} 圈</b><br />
+                    　L₀ = <b style={{ color: C.ice }}>{res.L0} mm</b>　/ k = <b style={{ color: C.green }}>{fmt3(res.k)} N/mm</b>　/ δ = {fmt2(res.delta)} mm　/ F = <b style={{ color: C.sky }}>{fmt2(res.F)} N</b>
+                  </div>
+                  <div style={{ background: C.red + "10", padding: "6px 10px", borderLeft: `2px solid ${C.red}`, borderRadius: 3, marginBottom: 6 }}>
+                    <b style={{ color: C.red }}>彈簧 B</b>　|　壓縮螺旋彈簧，{res.bSpring.end}<br />
+                    　材料：{res.bSpring.mat}（G = {res.bSpring.matData.G.toLocaleString()} MPa）<br />
+                    　d = <b style={{ color: C.ice }}>{res.bSpring.d} mm</b>　/ OD = <b style={{ color: C.ice }}>{fmt2(res.bSpring.OD)} mm</b>　/ Na = <b style={{ color: C.ice }}>{res.bSpring.Na} 圈</b><br />
+                    　L₀ = <b style={{ color: C.ice }}>{res.bSpring.L0} mm</b>　/ k = <b style={{ color: C.green }}>{fmt3(res.bSpring.k)} N/mm</b>　/ δ = {fmt2(res.bSpring.delta)} mm　/ F = <b style={{ color: C.sky }}>{fmt2(res.bSpring.F)} N</b>
+                  </div>
+                  <div style={{ background: C.gold + "10", padding: "6px 10px", borderLeft: `2px solid ${C.gold}`, borderRadius: 3 }}>
+                    <b style={{ color: C.gold }}>系統總體</b><br />
+                    　k_total = <b style={{ color: C.gold }}>{fmt3(res.k_total)} N/mm</b>　/ δ_total = <b style={{ color: C.amber }}>{fmt2(res.delta_total)} mm</b>　/ F = <b style={{ color: C.sky }}>{fmt2(res.F_total)} N</b>（{fmt3(res.F_total / 9.80665)} kgf）<br />
+                    　系統總自由長 = <b style={{ color: C.amber }}>{fmt2(res.L0_total)} mm</b>（A + B）<br />
+                    　<span style={{ color: C.dim }}>※ 採購數量：A 規格 {res.nP} 支 + B 規格 {res.nP} 支 = 共 {res.nP * 2} 支</span>
+                  </div>
+                </>
+              ) : (res.par || res.ser) ? (
+                <>
+                  型式：壓縮螺旋彈簧，{end}
+                  {res.par && <span style={{ color: C.gold,  fontWeight: 700 }}>　|　{res.nP} 支並聯</span>}
+                  {res.ser && <span style={{ color: C.amber, fontWeight: 700 }}>　|　{res.nS} 支串聯</span>}<br />
+                  材料：{mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
+                  線徑 d ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.d} mm</span> ／
+                  外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.OD)} mm</span> ／
+                  內徑 ID ＝ {fmt2(res.ID)} mm<br />
+                  單支自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>（實體高 Ls = {fmt2(res.Ls)} mm）<br />
+                  總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {res.Na}）<br />
+                  單支 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span>
+                  ／ 系統 k_total ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k_total)} N/mm</span><br />
+                  單支 δ ＝ {fmt2(res.delta)} mm
+                  {res.ser && <> ／ 系統 δ_total ＝ <span style={{ color: C.amber, fontWeight: 700 }}>{fmt2(res.delta_total)} mm</span></>}
+                  <br />
+                  單支 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>
+                  ／ 系統 F_total ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F_total)} N</span>（{fmt3(res.F_total / 9.80665)} kgf）<br />
+                  {res.ser && <>系統總自由長 ＝ <span style={{ color: C.amber, fontWeight: 700 }}>{fmt2(res.L0_total)} mm</span>（= {res.L0} × {res.nS}）<br /></>}
+                  <span style={{ color: C.dim }}>※ 採購數量：<b style={{ color: C.gold }}>{res.nP * res.nS} 支</b>　／　所有規格皆相同</span>
+                </>
+              ) : (
+                <>
+                  型式：壓縮螺旋彈簧，{end}<br />
+                  材料：{mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
+                  線徑 d ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.d} mm</span> ／
+                  外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.OD)} mm</span> ／
+                  內徑 ID ＝ {fmt2(res.ID)} mm<br />
+                  單支自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>（實體高 Ls = {fmt2(res.Ls)} mm）<br />
+                  總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {res.Na}）<br />
+                  彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span><br />
+                  工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+                </>
+              )}
             </div>
           </Card>
         </div>
@@ -1495,6 +1843,317 @@ function WaveModule() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// MODULE E: 矩形截面線圈彈簧（Rectangular Wire Coil Spring）
+// ════════════════════════════════════════════════════════════════════════════
+
+// β (剛度係數) 與 α (應力係數) — 依 a/b（長邊/短邊）查表
+// 採 Wahl/Marin 線圈彈簧矩形截面標準表
+const RECT_COEFFS = [
+  // a/b ,  beta  ,  alpha
+  [1.00, 0.1406, 0.208],
+  [1.20, 0.166,  0.219],
+  [1.50, 0.196,  0.231],
+  [1.75, 0.214,  0.239],
+  [2.00, 0.229,  0.246],
+  [2.50, 0.249,  0.258],
+  [3.00, 0.263,  0.267],
+  [4.00, 0.281,  0.282],
+  [6.00, 0.299,  0.298],
+  [8.00, 0.307,  0.307],
+  [10.0, 0.313,  0.313],
+  [1000, 0.333,  0.333],   // 趨近薄板
+];
+
+function rectCoeffs(ratio) {
+  const r = Math.max(1, ratio);
+  for (let i = 0; i < RECT_COEFFS.length - 1; i++) {
+    const [r1, b1, a1] = RECT_COEFFS[i];
+    const [r2, b2, a2] = RECT_COEFFS[i + 1];
+    if (r >= r1 && r <= r2) {
+      const t = (r - r1) / (r2 - r1);
+      return { beta: b1 + t * (b2 - b1), alpha: a1 + t * (a2 - a1) };
+    }
+  }
+  return { beta: 0.333, alpha: 0.333 };
+}
+
+// 矩形截面壓縮彈簧 (Wahl 標準公式):
+//   k = G · b · t³ · K1 / (D³ · Na)
+//   t = 軸向邊長 (parallel to spring axis), b = 徑向邊長 (radial)
+//   K1 (= β) 為剛度係數，依 b/t 比值查表
+// 應力 (剪應力):
+//   τ = Kw · F · D / (α · b · t²),  Kw 為 Wahl 修正係數
+function calcRectSpring(a, b, D, Na, G, L0, Lw) {
+  // 輸入 a = 軸向 (t)，b = 徑向；長/短邊以實際比例查表
+  const t_axial  = a;     // 軸向邊長
+  const b_radial = b;     // 徑向邊長
+  const longSide  = Math.max(t_axial, b_radial);
+  const shortSide = Math.min(t_axial, b_radial);
+  const ratio = longSide / shortSide;        // ≥ 1
+  const { beta, alpha } = rectCoeffs(ratio);
+
+  // 彈簧指數 C 用徑向邊長定義（影響線圈彎曲半徑）
+  const C     = D / b_radial;
+  const delta = L0 - Lw;
+
+  // Wahl 矩形截面剛度公式
+  // k = G · b_radial · t_axial³ · β / (D³ · Na)
+  const k = (G * b_radial * Math.pow(t_axial, 3) * beta) / (Math.pow(D, 3) * Na);
+  const F = k * delta;
+
+  // Wahl 應力修正
+  const Kw = (4*C - 1)/(4*C - 4) + 0.615/C;
+  // 剪應力: τ = Kw·F·D / (α · b_radial · t_axial²)
+  const tau = F > 0
+    ? (Kw * F * D) / (alpha * b_radial * t_axial * t_axial)
+    : 0;
+
+  // OD / ID 用徑向邊長計算
+  const OD = D + b_radial;
+  const ID = D - b_radial;
+  return {
+    a: t_axial, b: b_radial, ratio, beta, alpha,
+    C, delta, k, F, Kw, tau, OD, ID,
+    t_axial, b_radial, longSide, shortSide,
+  };
+}
+
+function RectSpringDiagram({ a, b, D, Na, L0, OD, Ls }) {
+  const W = 160, H = 280;
+  const pad = 24;
+  const drawH = H - pad * 2;
+  const scaleY = drawH / (L0 * 1.15);
+  const cx = W / 2;
+  const springX = (OD / 2) * scaleY * 0.8;
+
+  // Generate stacked rectangles for coils (side view)
+  const pitch = (L0 - a) / Na;
+  const coils = [];
+  for (let i = 0; i < Na; i++) {
+    const y = pad + drawH - i * pitch * scaleY - a * scaleY;
+    coils.push(y);
+  }
+
+  return (
+    <svg width={W} height={H} style={{ display: "block", margin: "0 auto" }}>
+      {/* Coils as flat rectangles (side view) */}
+      {coils.map((y, i) => (
+        <rect key={i}
+              x={cx - springX} y={y}
+              width={springX * 2} height={Math.max(2, a * scaleY)}
+              fill={C.sky} fillOpacity={0.7}
+              stroke={C.ice} strokeWidth={0.5} />
+      ))}
+
+      {/* L0 marker */}
+      <line x1={W - 8} y1={pad} x2={W - 8} y2={pad + drawH}
+            stroke={C.red} strokeWidth={1.5} />
+      <text x={W - 14} y={pad + drawH/2} fill={C.red} fontSize={9}
+            fontFamily="Courier New" textAnchor="end">L₀</text>
+
+      {/* OD label bottom */}
+      <line x1={cx - springX} y1={H - 14} x2={cx + springX} y2={H - 14}
+            stroke={C.ice} strokeWidth={1} markerStart="url(#arr2)" markerEnd="url(#arr2)" />
+      <text x={cx} y={H - 4} fill={C.ice} fontSize={9} fontFamily="Courier New" textAnchor="middle">OD</text>
+
+      {/* a × b legend */}
+      <text x={6} y={pad - 6} fill={C.gold} fontSize={9} fontFamily="Courier New">
+        a×b={a}×{b}
+      </text>
+
+      <defs>
+        <marker id="arr2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+          <path d="M0,0 L6,3 L0,6 Z" fill={C.ice} />
+        </marker>
+      </defs>
+    </svg>
+  );
+}
+
+function RectSpringModule() {
+  const [a,   setA]   = useState(2.0);    // 軸向邊長（短邊）
+  const [b,   setB]   = useState(3.0);    // 徑向邊長（長邊）
+  const [D,   setDD]  = useState(15.0);
+  const [Na,  setNa]  = useState(6.0);
+  const [end, setEnd] = useState("閉合並磨平 (+2)");
+  const [mat, setMat] = useState("碳鋼琴鋼線 SWC");
+  const [L0,  setL0]  = useState(28.0);
+  const [Lw,  setLw]  = useState(20.0);
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+
+  const calc = () => {
+    const errors = [];
+    if (a <= 0 || b <= 0) errors.push("邊長 a, b 須 > 0");
+    if (D <= Math.max(a, b)) errors.push("平均徑 D 須 > 截面邊長");
+    if (Na < 1) errors.push("有效圈 Na 須 ≥ 1");
+    if (Lw >= L0) errors.push("工作長須 < 自由長");
+    if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
+    setErr("");
+
+    const matData = MAT_G[mat];
+    const Ne = END_COILS[end];
+    const Nt = Na + Ne;
+    const r  = calcRectSpring(a, b, D, Na, matData.G, L0, Lw);
+
+    // 強度估算（取短邊估線徑等效）
+    const dEq      = Math.sqrt(4 * a * b / Math.PI);   // 等效圓直徑
+    const Sut      = matData.coeff * Math.pow(dEq, matData.exp);
+    const tauAllow = 0.45 * Sut;
+    const SF       = r.tau > 0 ? tauAllow / r.tau : Infinity;
+
+    setRes({
+      ...r, Sut, tauAllow, SF, dEq, Nt,
+      Ls: Nt * r.t_axial,  // 實體高 = 總圈數 × 軸向邊長
+      Ne, mat, matData, L0, Lw, end,
+    });
+  };
+
+  const row = { display: "flex", flexWrap: "wrap", gap: 20 };
+
+  return (
+    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+      <Card style={{ flex: "0 0 300px" }}>
+        <SectionTitle icon="🟨">矩形截面尺寸</SectionTitle>
+        <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", marginBottom: 10, lineHeight: 1.6 }}>
+          a：與彈簧軸平行的邊（短邊推薦）<br />
+          b：徑向方向的邊（長邊推薦）<br />
+          <span style={{ color: C.gold }}>※ 矩形長邊垂直於軸線可減少空間佔用</span>
+        </div>
+        <div style={row}>
+          <Input label="邊長 a"   value={a}  onChange={setA}  step={0.1} unit="mm" />
+          <Input label="邊長 b"   value={b}  onChange={setB}  step={0.1} unit="mm" />
+        </div>
+        <div style={row}>
+          <Input label="平均徑 D"  value={D}  onChange={setDD} step={0.5} unit="mm" />
+          <Input label="有效圈 Na" value={Na} onChange={setNa} step={0.5} unit="圈" />
+        </div>
+        <Select label="端部型式" value={end} onChange={setEnd} options={Object.keys(END_COILS)} />
+
+        <SectionTitle icon="🔧">材料 & 工作條件</SectionTitle>
+        <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
+        <div style={row}>
+          <Input label="自由長 L₀" value={L0} onChange={setL0} step={1} unit="mm" />
+          <Input label="工作長 Lw" value={Lw} onChange={setLw} step={1} unit="mm" />
+        </div>
+
+        {err && <div style={{ color: C.red, fontFamily: "Courier New", fontSize: 11, marginBottom: 10 }}>⚠ {err}</div>}
+        <CalcButton onClick={calc}>▶ 計算 k & F</CalcButton>
+      </Card>
+
+      {res && (
+        <div style={{ flex: 1, minWidth: 340, display: "flex", flexDirection: "column", gap: 16 }}>
+          {res.C < 4 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 彈簧指數 C = {fmt2(res.C)} &lt; 4，應力集中過高</div>}
+          {res.ratio > 5 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 截面比 a/b = {fmt2(res.ratio)} 太扁，建議改用扁鋼帶彈簧</div>}
+
+          {/* KPI row */}
+          <Card>
+            <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+              <div>
+                <Label>彈簧常數 k</Label>
+                <div><Value big color={C.green}>{fmt3(res.k)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.k / 9.80665)} kgf/mm</div>
+              </div>
+              <div>
+                <Label>壓縮量 δ</Label>
+                <div><Value>{fmt2(res.delta)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>mm</span>
+                </div>
+              </div>
+              <div>
+                <Label>彈簧力 F</Label>
+                <div><Value big color={C.sky}>{fmt2(res.F)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.F / 9.80665)} kgf</div>
+              </div>
+              <div>
+                <Label>安全係數</Label>
+                <div style={{ marginTop: 4 }}><Badge sf={res.SF} /></div>
+              </div>
+            </div>
+          </Card>
+
+          {/* Geometry + diagram */}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <SectionTitle icon="📐">幾何 & 截面參數</SectionTitle>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 20px" }}>
+                {[
+                  ["軸向 a",      fmt2(res.t_axial), "mm"],
+                  ["徑向 b",      fmt2(res.b_radial), "mm"],
+                  ["長/短邊比",   fmt3(res.ratio), ""],
+                  ["剛度係數 β",  fmt3(res.beta), ""],
+                  ["應力係數 α",  fmt3(res.alpha), ""],
+                  ["彈簧指數 C",  fmt2(res.C), ""],
+                  ["Wahl Kw",     fmt3(res.Kw), ""],
+                  ["等效圓徑",    fmt2(res.dEq), "mm"],
+                  ["外徑 OD",     fmt2(res.OD), "mm"],
+                  ["內徑 ID",     fmt2(res.ID), "mm"],
+                  ["總圈 Nt",     res.Nt, "圈"],
+                  ["實體高 Ls",   fmt2(res.Ls), "mm"],
+                  ["工作應力 τ",  fmt1(res.tau), "MPa"],
+                  ["許用應力",    fmt1(res.tauAllow), "MPa"],
+                ].map(([l, v, u]) => (
+                  <div key={l}>
+                    <Label>{l}</Label>
+                    <div>
+                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            <Card style={{ flex: "0 0 180px" }}>
+              <SectionTitle icon="🔍">截面示意</SectionTitle>
+              <RectSpringDiagram
+                a={res.t_axial} b={res.b_radial} D={D}
+                Na={Na} L0={res.L0}
+                OD={res.OD} Ls={res.Ls}
+              />
+            </Card>
+          </div>
+
+          {/* Charts */}
+          <Card>
+            <SectionTitle icon="📈">簧力 vs 壓縮量</SectionTitle>
+            <ForceChart k={res.k} delta={res.delta} F={res.F} Ls={res.Ls} L0={res.L0} />
+          </Card>
+
+          <Card>
+            <SectionTitle icon="🔍">應力分析</SectionTitle>
+            <StressChart tau={res.tau} tauAllow={res.tauAllow} Sut={res.Sut} />
+          </Card>
+
+          {/* Vendor spec */}
+          <Card style={{ borderColor: C.gold + "66" }}>
+            <SectionTitle icon="📋">廠商規格摘要</SectionTitle>
+            <div style={{ fontFamily: "Courier New", fontSize: 11.5, color: C.text, lineHeight: 2 }}>
+              型式：壓縮螺旋彈簧（矩形截面），{res.end}<br />
+              材料：{res.mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
+              截面：軸向 a = <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.t_axial)} mm</span>
+              ／ 徑向 b = <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.b_radial)} mm</span>
+              （長/短邊比 {fmt2(res.ratio)}）<br />
+              外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.OD)} mm</span> ／
+              內徑 ID ＝ {fmt2(res.ID)} mm ／ 平均徑 D = {D} mm<br />
+              自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>（實體高 Ls = {fmt2(res.Ls)} mm）<br />
+              總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {Na}）<br />
+              彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span>
+              （β = {fmt3(res.beta)}）<br />
+              工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // ROOT
 // ════════════════════════════════════════════════════════════════════════════
 function App() {
@@ -1527,12 +2186,14 @@ function App() {
         <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
           <Tab label="🔩 螺絲軸力 & 彈簧選型" active={tab === "screw"} onClick={() => setTab("screw")} />
           <Tab label="🌀 線圈彈簧 k & 簧力計算" active={tab === "spring"} onClick={() => setTab("spring")} />
+          <Tab label="🟨 矩形截面線圈彈簧"   active={tab === "rect"}      onClick={() => setTab("rect")} />
           <Tab label="🔶 碟形彈簧 Belleville"  active={tab === "belleville"} onClick={() => setTab("belleville")} />
           <Tab label="🌊 波形彈簧 Wave Spring"  active={tab === "wave"} onClick={() => setTab("wave")} />
         </div>
 
         {tab === "screw"      && <ScrewModule />}
         {tab === "spring"     && <SpringModule />}
+        {tab === "rect"       && <RectSpringModule />}
         {tab === "belleville" && <BellevilleModule />}
         {tab === "wave"       && <WaveModule />}
       </div>
