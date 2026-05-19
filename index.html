@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Spring Screw Calculator</title>
   <link rel="preconnect" href="https://esm.sh">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap">
   <style>
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; background: #0D1B2A; }
@@ -623,13 +626,18 @@ function downloadWaveSpringStep({ OD, ID, t, N, n, H0 }, filename) {
 
 // ── tiny components ──────────────────────────────────────────────────────────
 function Label({ children }) {
-  return <span style={{ color: C.dim, fontSize: 11, fontFamily: "Courier New", letterSpacing: 1, textTransform: "uppercase" }}>{children}</span>;
+  return <span style={{
+    color: C.dim, fontSize: 11,
+    fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", "SF Mono", monospace',
+    letterSpacing: 0.5,
+  }}>{children}</span>;
 }
 
 function Value({ children, big, color }) {
   return (
     <span style={{
-      color: color || C.ice, fontFamily: "Courier New",
+      color: color || C.ice,
+      fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", "SF Mono", monospace',
       fontSize: big ? 26 : 15, fontWeight: 700, letterSpacing: big ? 1 : 0
     }}>{children}</span>
   );
@@ -658,7 +666,8 @@ function Input({ label, value, onChange, step = 0.1, min = 0, unit }) {
           onChange={e => onChange(parseFloat(e.target.value) || 0)}
           style={{
             background: "#0A1929", border: `1px solid ${C.border}`, color: C.text,
-            padding: "7px 10px", borderRadius: 4, width: 110, fontFamily: "Courier New",
+            padding: "7px 10px", borderRadius: 4, width: 110,
+            fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", "SF Mono", monospace',
             fontSize: 14, outline: "none",
           }}
         />
@@ -892,6 +901,231 @@ function CalcButton({ onClick, children }) {
   );
 }
 
+// ── Schematic SVG: parameter reference diagrams ─────────────────────────────
+function SchematicCard({ title, children, height = 180 }) {
+  return (
+    <div style={{
+      background: C.panel + "AA", border: `1px dashed ${C.border}`,
+      borderRadius: 6, padding: "10px 12px", marginBottom: 14,
+    }}>
+      <div style={{ color: C.dim, fontSize: 10, fontFamily: "Courier New",
+                    letterSpacing: 1.5, marginBottom: 6 }}>
+        📐 {title}
+      </div>
+      <svg width="100%" height={height} viewBox={`0 0 280 ${height}`} preserveAspectRatio="xMidYMid meet">
+        {children}
+      </svg>
+    </div>
+  );
+}
+
+// 標註文字 (parameter callout)
+const Note = ({ x, y, text, color = "#7BB8E8", anchor = "start", size = 10 }) => (
+  <text x={x} y={y} fill={color} fontSize={size} fontFamily="Courier New"
+        textAnchor={anchor} dominantBaseline="middle">{text}</text>
+);
+
+// 雙箭頭線段 (dimension line)
+const DimArrow = ({ x1, y1, x2, y2, color = "#E2EAF4" }) => (
+  <g>
+    <defs>
+      <marker id={`arr-${color.replace('#','')}`} markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+        <path d="M0,0 L6,3 L0,6 Z" fill={color} />
+      </marker>
+    </defs>
+    <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} strokeWidth="1"
+          markerStart={`url(#arr-${color.replace('#','')})`}
+          markerEnd={`url(#arr-${color.replace('#','')})`} />
+  </g>
+);
+
+// 🌀 圓線圈彈簧示意（側視）
+function CoilSpringSchematic() {
+  return (
+    <SchematicCard title="線圈彈簧參數示意（側視 + 截面）">
+      {/* 主體彈簧（簡化波浪線表示） */}
+      {Array.from({length: 7}, (_, i) => (
+        <ellipse key={i} cx="100" cy={30 + i*18} rx="36" ry="6"
+                 fill="none" stroke="#2E74B5" strokeWidth="2.5" opacity="0.85" />
+      ))}
+      {/* 線徑截面（右側放大） */}
+      <circle cx="220" cy="50" r="12" fill="none" stroke="#F59E0B" strokeWidth="1.5" />
+      <line x1="208" y1="50" x2="232" y2="50" stroke="#F59E0B" strokeWidth="0.5" strokeDasharray="2 2" />
+      <Note x="240" y="50" text="d" color="#F59E0B" />
+      <Note x="220" y="75" text="(線徑)" color="#7A9BBE" anchor="middle" size={9} />
+
+      {/* L₀ 標註（左側，全長） */}
+      <DimArrow x1="50" y1="24" x2="50" y2="138" color="#B91C1C" />
+      <Note x="42" y="76" text="L₀" color="#B91C1C" anchor="end" />
+      <Note x="42" y="88" text="(自由長)" color="#7A9BBE" anchor="end" size={9} />
+
+      {/* Lw 標註（左側偏右，工作長） */}
+      <line x1="60" y1="138" x2="80" y2="138" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <line x1="60" y1="60" x2="80" y2="60" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <DimArrow x1="75" y1="60" x2="75" y2="138" color="#2E7D4F" />
+      <Note x="82" y="98" text="Lw" color="#2E7D4F" />
+      <Note x="82" y="110" text="(工作長)" color="#7A9BBE" size={9} />
+
+      {/* OD 標註（底部） */}
+      <DimArrow x1="64" y1="160" x2="136" y2="160" />
+      <Note x="100" y="172" text="OD" color="#7BB8E8" anchor="middle" />
+
+      {/* Dm 標註（中段虛線） */}
+      <line x1="70" y1="84" x2="130" y2="84" stroke="#7BB8E8" strokeWidth="0.6" strokeDasharray="3 3" opacity="0.6" />
+      <Note x="100" y="76" text="Dm" color="#7BB8E8" anchor="middle" size={10} />
+
+      {/* Na 標註 */}
+      <Note x="156" y="100" text="Na" color="#2E7D4F" />
+      <Note x="156" y="112" text="(有效圈數)" color="#7A9BBE" size={9} />
+    </SchematicCard>
+  );
+}
+
+// 🟨 矩形截面線圈彈簧
+function RectSpringSchematic() {
+  return (
+    <SchematicCard title="矩形截面參數示意（側視 + 截面放大）">
+      {/* 簡化線圈（堆疊矩形） */}
+      {Array.from({length: 6}, (_, i) => (
+        <rect key={i} x="64" y={30 + i*18} width="72" height="10"
+              fill="#2E74B5" fillOpacity="0.6" stroke="#7BB8E8" strokeWidth="0.5" />
+      ))}
+
+      {/* 截面放大（右側） */}
+      <rect x="200" y="50" width="30" height="20" fill="none" stroke="#F59E0B" strokeWidth="1.5" />
+      <Note x="215" y="40" text="(截面放大)" color="#7A9BBE" anchor="middle" size={9} />
+      {/* a 標註（軸向 = 垂直） */}
+      <DimArrow x1="240" y1="50" x2="240" y2="70" color="#F59E0B" />
+      <Note x="246" y="60" text="a" color="#F59E0B" />
+      <Note x="246" y="72" text="(軸向)" color="#7A9BBE" size={9} />
+      {/* b 標註（徑向 = 水平） */}
+      <DimArrow x1="200" y1="82" x2="230" y2="82" color="#F59E0B" />
+      <Note x="215" y="94" text="b" color="#F59E0B" anchor="middle" />
+      <Note x="215" y="106" text="(徑向)" color="#7A9BBE" anchor="middle" size={9} />
+
+      {/* L₀ 全長 */}
+      <DimArrow x1="50" y1="24" x2="50" y2="144" color="#B91C1C" />
+      <Note x="42" y="80" text="L₀" color="#B91C1C" anchor="end" />
+      <Note x="42" y="92" text="(自由長)" color="#7A9BBE" anchor="end" size={9} />
+
+      {/* Lw（工作長，虛線示意） */}
+      <line x1="60" y1="144" x2="78" y2="144" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <line x1="60" y1="60" x2="78" y2="60" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <DimArrow x1="74" y1="60" x2="74" y2="144" color="#2E7D4F" />
+      <Note x="82" y="100" text="Lw" color="#2E7D4F" size={10} />
+
+      {/* OD/Dm 底部 */}
+      <DimArrow x1="64" y1="160" x2="136" y2="160" />
+      <Note x="100" y="172" text="OD ／ Dm" color="#7BB8E8" anchor="middle" />
+
+      {/* Na（圈數） */}
+      <Note x="156" y="124" text="Na (有效圈)" color="#2E7D4F" size={9} />
+    </SchematicCard>
+  );
+}
+
+// 🔶 碟形彈簧（剖面 + 俯視）
+function BellevilleSchematic() {
+  return (
+    <SchematicCard title="碟形彈簧參數示意（剖面圖）" height={170}>
+      {/* 碟形剖面（左右兩半）*/}
+      <g>
+        {/* 左半（向上錐） */}
+        <polygon points="40,110 60,110 110,80 110,90 60,120 40,120" fill="#D97706" fillOpacity="0.5" stroke="#B45309" strokeWidth="1" />
+        {/* 右半（鏡像） */}
+        <polygon points="240,110 220,110 170,80 170,90 220,120 240,120" fill="#D97706" fillOpacity="0.5" stroke="#B45309" strokeWidth="1" />
+      </g>
+
+      {/* De 標註（外徑） */}
+      <DimArrow x1="40" y1="145" x2="240" y2="145" color="#B91C1C" />
+      <Note x="140" y="158" text="De" color="#B91C1C" anchor="middle" />
+      <Note x="140" y="170" text="(外徑)" color="#7A9BBE" anchor="middle" size={9} />
+
+      {/* Di 標註（內徑） */}
+      <DimArrow x1="110" y1="60" x2="170" y2="60" color="#F59E0B" />
+      <Note x="140" y="50" text="Di" color="#F59E0B" anchor="middle" />
+      <Note x="140" y="38" text="(內徑)" color="#7A9BBE" anchor="middle" size={9} />
+
+      {/* h₀ 標註（自由錐高） */}
+      <line x1="20" y1="80" x2="50" y2="80" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <line x1="20" y1="115" x2="50" y2="115" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <DimArrow x1="25" y1="80" x2="25" y2="115" color="#2E7D4F" />
+      <Note x="14" y="97" text="h₀" color="#2E7D4F" anchor="end" />
+
+      {/* t 標註（厚度）*/}
+      <DimArrow x1="115" y1="80" x2="115" y2="90" color="#7BB8E8" />
+      <Note x="122" y="85" text="t" color="#7BB8E8" />
+      <Note x="122" y="97" text="(厚度)" color="#7A9BBE" size={9} />
+
+      {/* s 標註 */}
+      <Note x="140" y="20" text="s = 工作壓縮量（< h₀）" color="#7A9BBE" anchor="middle" size={9} />
+    </SchematicCard>
+  );
+}
+
+// 🌊 波形彈簧
+function WaveSpringSchematic() {
+  return (
+    <SchematicCard title="波形彈簧參數示意（側視 + 俯視）" height={200}>
+      {/* 側視（波浪堆疊） */}
+      <g>
+        {/* 3 圈波形（簡化） */}
+        {[0, 1, 2].map((k) => {
+          const yBase = 40 + k * 30;
+          const phase = k % 2 === 0 ? 0 : Math.PI;
+          let path = `M 40 ${yBase}`;
+          for (let x = 0; x <= 80; x += 2) {
+            const y = yBase + 8 * Math.sin((x / 80) * 4 * Math.PI + phase);
+            path += ` L ${40 + x} ${y}`;
+          }
+          return <path key={k} d={path} stroke="#1B6E8F" strokeWidth="2" fill="none" />;
+        })}
+      </g>
+
+      {/* H₀ 全長 */}
+      <DimArrow x1="25" y1="32" x2="25" y2="108" color="#B91C1C" />
+      <Note x="18" y="62" text="H₀" color="#B91C1C" anchor="end" />
+      <Note x="18" y="74" text="(自由高)" color="#7A9BBE" anchor="end" size={9} />
+
+      {/* Hw 工作高（虛線示意，壓縮後） */}
+      <line x1="40" y1="108" x2="125" y2="108" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <line x1="40" y1="48"  x2="125" y2="48"  stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <DimArrow x1="122" y1="48" x2="122" y2="108" color="#2E7D4F" />
+      <Note x="130" y="75" text="Hw" color="#2E7D4F" />
+      <Note x="130" y="87" text="(工作高)" color="#7A9BBE" size={9} />
+
+      {/* n 標註 */}
+      <Note x="45" y="22" text="n = 3 圈" color="#2E7D4F" size={9} />
+
+      {/* OD/ID 標註 */}
+      <DimArrow x1="40" y1="135" x2="120" y2="135" color="#7BB8E8" />
+      <Note x="80" y="147" text="OD" color="#7BB8E8" anchor="middle" />
+      {/* ID 虛線範圍 */}
+      <line x1="55" y1="125" x2="55" y2="142" stroke="#7BB8E8" strokeWidth="0.5" strokeDasharray="2 2" />
+      <line x1="105" y1="125" x2="105" y2="142" stroke="#7BB8E8" strokeWidth="0.5" strokeDasharray="2 2" />
+      <DimArrow x1="55" y1="158" x2="105" y2="158" color="#7BB8E8" />
+      <Note x="80" y="170" text="ID" color="#7BB8E8" anchor="middle" size={9} />
+
+      {/* 俯視小圖（右下） */}
+      <g transform="translate(180, 60)">
+        <circle cx="40" cy="40" r="35" fill="none" stroke="#7A9BBE" strokeWidth="0.5" strokeDasharray="2 2" />
+        <circle cx="40" cy="40" r="20" fill="none" stroke="#7A9BBE" strokeWidth="0.5" strokeDasharray="2 2" />
+        {/* 4 個波峰示意 */}
+        {[0, 1, 2, 3].map(i => {
+          const a = i * Math.PI / 2;
+          const x1 = 40 + 28 * Math.cos(a);
+          const y1 = 40 + 28 * Math.sin(a);
+          return <circle key={i} cx={x1} cy={y1} r="3" fill="#1B6E8F" />;
+        })}
+        <Note x="40" y="92" text="N = 4 波（俯視）" color="#1B6E8F" anchor="middle" size={9} />
+      </g>
+
+      {/* t 標註（厚度） */}
+      <Note x="180" y="30" text="t (材料厚度)" color="#F59E0B" size={9} />
+    </SchematicCard>
+  );
+}
+
 // ── STEP file download button (CAD-themed) ──────────────────────────────────
 function StepDownloadButton({ onClick, label }) {
   const [busy, setBusy] = useState(false);
@@ -1022,7 +1256,7 @@ function ScrewModule() {
         <div style={{ flex: 1, minWidth: 340, display: "flex", flexDirection: "column", gap: 16 }}>
           {/* KPIs */}
           <Card>
-            <SectionTitle icon="📊">螺絲軸力</SectionTitle>
+            <SectionTitle icon="⬆️">螺絲軸力</SectionTitle>
             <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
               <div>
                 <Label>軸力 F</Label>
@@ -1223,14 +1457,14 @@ function SpringModule() {
   const calc = () => {
     const errors = [];
     if (d <= 0)   errors.push("線徑 d 須 > 0");
-    if (D <= d)   errors.push("平均徑 D 須 > 線徑 d");
+    if (D <= d)   errors.push("線圈中徑 Dm 須 > 線徑 d");
     if (Na < 1)   errors.push("有效圈 Na 須 ≥ 1");
     if (Lw >= L0) errors.push("工作長須 < 自由長");
     if (par && nP < 2) errors.push("並聯支數須 ≥ 2");
     if (ser && nS < 2) errors.push("串聯支數須 ≥ 2");
     if (mix) {
       if (dB <= 0)    errors.push("彈簧 B：線徑 d 須 > 0");
-      if (DDB <= dB)  errors.push("彈簧 B：平均徑 D 須 > 線徑 d");
+      if (DDB <= dB)  errors.push("彈簧 B：線圈中徑 Dm 須 > 線徑 d");
       if (NaB < 1)    errors.push("彈簧 B：有效圈 Na 須 ≥ 1");
       if (LwB >= L0B) errors.push("彈簧 B：工作長須 < 自由長");
     }
@@ -1320,10 +1554,11 @@ function SpringModule() {
     <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
       {/* LEFT */}
       <Card style={{ flex: "0 0 300px" }}>
+        <CoilSpringSchematic />
         <SectionTitle icon="📐">{mix ? "彈簧 A 尺寸輸入" : "彈簧尺寸輸入"}</SectionTitle>
         <div style={row}>
           <Input label="線徑 d"    value={d}  onChange={setD}  step={0.1} unit="mm" />
-          <Input label="平均徑 D"  value={D}  onChange={setDD} step={0.5} unit="mm" />
+          <Input label="線圈中徑 Dm"  value={D}  onChange={setDD} step={0.5} unit="mm" />
           <Input label="有效圈 Na" value={Na} onChange={setNa} step={0.5} unit="圈" />
         </div>
         <Select label="端部型式" value={end} onChange={setEnd} options={Object.keys(END_COILS)} />
@@ -1410,7 +1645,7 @@ function SpringModule() {
             <SectionTitle icon="📐">彈簧 B 尺寸輸入</SectionTitle>
             <div style={row}>
               <Input label="線徑 d"    value={dB}  onChange={setDB}  step={0.1} unit="mm" />
-              <Input label="平均徑 D"  value={DDB} onChange={setDDB} step={0.5} unit="mm" />
+              <Input label="線圈中徑 Dm"  value={DDB} onChange={setDDB} step={0.5} unit="mm" />
               <Input label="有效圈 Na" value={NaB} onChange={setNaB} step={0.5} unit="圈" />
             </div>
             <Select label="端部型式" value={endB} onChange={setEndB} options={Object.keys(END_COILS)} />
@@ -1599,7 +1834,7 @@ function SpringModule() {
             </Card>
 
             <Card style={{ flex: "0 0 180px" }}>
-              <SectionTitle icon="🔍">彈簧示意圖</SectionTitle>
+              <SectionTitle icon="🖼️">彈簧示意圖</SectionTitle>
               <SpringDiagram
                 d={res.d} D={res.D} Na={res.Na}
                 L0={res.L0} Lw={res.Lw} OD={res.OD}
@@ -1629,7 +1864,7 @@ function SpringModule() {
           </Card>
 
           <Card>
-            <SectionTitle icon="🔍">應力分析</SectionTitle>
+            <SectionTitle icon="🌡️">應力分析</SectionTitle>
             <StressChart tau={res.tau} tauAllow={res.tauAllow} Sut={res.Sut} />
           </Card>
 
@@ -1700,7 +1935,7 @@ function SpringModule() {
 
           {/* CAD download */}
           <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
-            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <SectionTitle icon="💾">3D CAD 模型下載</SectionTitle>
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <StepDownloadButton
                 onClick={() => {
@@ -1903,6 +2138,7 @@ function BellevilleModule() {
   return (
     <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
       <Card style={{ flex: "0 0 300px" }}>
+        <BellevilleSchematic />
         <SectionTitle icon="🔶">碟形彈簧尺寸</SectionTitle>
         <div style={row}>
           <Input label="外徑 De" value={De} onChange={setDe} step={0.5} unit="mm" />
@@ -2003,7 +2239,7 @@ function BellevilleModule() {
             </Card>
 
             <Card style={{ flex: "0 0 220px" }}>
-              <SectionTitle icon="🔍">剖面示意</SectionTitle>
+              <SectionTitle icon="🖼️">剖面示意</SectionTitle>
               <BellevilleDiagram De={De} Di={Di} t={t} h0={h0} s={s} nParallel={res.nP} nSeries={res.nS} />
             </Card>
           </div>
@@ -2014,6 +2250,15 @@ function BellevilleModule() {
             <BellevilleForceChart points={res.points} workingS={res.s} workingF={res.F} h0={res.h0} />
             <div style={{ color: C.dim, fontSize: 10.5, marginTop: 6, fontFamily: "Courier New" }}>
               ★ Belleville 的 F-s 非線性；當 h₀/t = √2 ≈ 1.414 時出現負剛度區
+            </div>
+          </Card>
+
+          {/* 應力分析 */}
+          <Card>
+            <SectionTitle icon="🌡️">應力分析</SectionTitle>
+            <StressChart tau={res.sigma_OM} tauAllow={res.sigma_allow} Sut={res.Sut_typ} />
+            <div style={{ color: C.dim, fontSize: 10.5, marginTop: 6, fontFamily: "Courier New" }}>
+              σ_OM = 內緣上表面最大壓應力（Belleville 失效臨界點） &nbsp;|&nbsp; 許用 = 0.85 × Sut
             </div>
           </Card>
 
@@ -2035,7 +2280,7 @@ function BellevilleModule() {
 
           {/* CAD download */}
           <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
-            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <SectionTitle icon="💾">3D CAD 模型下載</SectionTitle>
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <StepDownloadButton
                 onClick={() => {
@@ -2146,6 +2391,7 @@ function WaveModule() {
   return (
     <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
       <Card style={{ flex: "0 0 300px" }}>
+        <WaveSpringSchematic />
         <SectionTitle icon="🌊">波形彈簧尺寸</SectionTitle>
         <div style={row}>
           <Input label="外徑 OD" value={OD} onChange={setOD} step={1} unit="mm" />
@@ -2211,7 +2457,7 @@ function WaveModule() {
               <SectionTitle icon="📐">幾何摘要</SectionTitle>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 20px" }}>
                 {[
-                  ["平均徑 Dm",     fmt2(res.Dm), "mm"],
+                  ["線圈中徑 Dm",     fmt2(res.Dm), "mm"],
                   ["徑向寬 b",      fmt2(res.b),  "mm"],
                   ["材料厚 t",      res.t, "mm"],
                   ["波數 / 圈數",   `${res.N} / ${res.n}`, ""],
@@ -2232,7 +2478,7 @@ function WaveModule() {
             </Card>
 
             <Card style={{ flex: "0 0 220px" }}>
-              <SectionTitle icon="🔍">頂視示意</SectionTitle>
+              <SectionTitle icon="🖼️">頂視示意</SectionTitle>
               <WaveDiagram OD={OD} ID={ID} N={N} />
             </Card>
           </div>
@@ -2245,7 +2491,7 @@ function WaveModule() {
 
           {/* 應力 */}
           <Card>
-            <SectionTitle icon="🔍">應力分析</SectionTitle>
+            <SectionTitle icon="🌡️">應力分析</SectionTitle>
             <StressChart tau={res.sigma} tauAllow={res.sigma_allow} Sut={res.Sut_typ} />
           </Card>
 
@@ -2269,7 +2515,7 @@ function WaveModule() {
 
           {/* CAD download */}
           <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
-            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <SectionTitle icon="💾">3D CAD 模型下載</SectionTitle>
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <StepDownloadButton
                 onClick={() => {
@@ -2436,7 +2682,7 @@ function RectSpringModule() {
   const calc = () => {
     const errors = [];
     if (a <= 0 || b <= 0) errors.push("邊長 a, b 須 > 0");
-    if (D <= Math.max(a, b)) errors.push("平均徑 D 須 > 截面邊長");
+    if (D <= Math.max(a, b)) errors.push("線圈中徑 Dm 須 > 截面邊長");
     if (Na < 1) errors.push("有效圈 Na 須 ≥ 1");
     if (Lw >= L0) errors.push("工作長須 < 自由長");
     if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
@@ -2465,18 +2711,17 @@ function RectSpringModule() {
   return (
     <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
       <Card style={{ flex: "0 0 300px" }}>
+        <RectSpringSchematic />
         <SectionTitle icon="🟨">矩形截面尺寸</SectionTitle>
-        <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", marginBottom: 10, lineHeight: 1.6 }}>
-          a：與彈簧軸平行的邊（短邊推薦）<br />
-          b：徑向方向的邊（長邊推薦）<br />
-          <span style={{ color: C.gold }}>※ 矩形長邊垂直於軸線可減少空間佔用</span>
+        <div style={{ color: C.gold, fontSize: 10, fontFamily: "Courier New", marginBottom: 10 }}>
+          ※ 一般將長邊置於徑向方向以減少軸向空間
         </div>
         <div style={row}>
           <Input label="邊長 a"   value={a}  onChange={setA}  step={0.1} unit="mm" />
           <Input label="邊長 b"   value={b}  onChange={setB}  step={0.1} unit="mm" />
         </div>
         <div style={row}>
-          <Input label="平均徑 D"  value={D}  onChange={setDD} step={0.5} unit="mm" />
+          <Input label="線圈中徑 Dm"  value={D}  onChange={setDD} step={0.5} unit="mm" />
           <Input label="有效圈 Na" value={Na} onChange={setNa} step={0.5} unit="圈" />
         </div>
         <Select label="端部型式" value={end} onChange={setEnd} options={Object.keys(END_COILS)} />
@@ -2576,7 +2821,7 @@ function RectSpringModule() {
           </Card>
 
           <Card>
-            <SectionTitle icon="🔍">應力分析</SectionTitle>
+            <SectionTitle icon="🌡️">應力分析</SectionTitle>
             <StressChart tau={res.tau} tauAllow={res.tauAllow} Sut={res.Sut} />
           </Card>
 
@@ -2590,7 +2835,7 @@ function RectSpringModule() {
               ／ 徑向 b = <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.b_radial)} mm</span>
               （長/短邊比 {fmt2(res.ratio)}）<br />
               外徑 OD ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{fmt2(res.OD)} mm</span> ／
-              內徑 ID ＝ {fmt2(res.ID)} mm ／ 平均徑 D = {D} mm<br />
+              內徑 ID ＝ {fmt2(res.ID)} mm ／ 線圈中徑 Dm = {D} mm<br />
               自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>（實體高 Ls = {fmt2(res.Ls)} mm）<br />
               總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {Na}）<br />
               彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span>
@@ -2601,7 +2846,7 @@ function RectSpringModule() {
 
           {/* CAD download */}
           <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
-            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <SectionTitle icon="💾">3D CAD 模型下載</SectionTitle>
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
               <StepDownloadButton
                 onClick={() => {
@@ -2642,7 +2887,7 @@ function App() {
       }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
           <span style={{ fontSize: 26, fontFamily: "Georgia, serif", color: C.text, letterSpacing: 1 }}>
-            🔩 Spring Screw
+            🔩🌀 Spring Screw
           </span>
           <span style={{ fontFamily: "Courier New", fontSize: 11, color: C.sky, letterSpacing: 3, borderLeft: `1px solid ${C.border}`, paddingLeft: 14 }}>
             CALCULATOR v3.0
@@ -2656,7 +2901,7 @@ function App() {
       <div style={{ padding: "0 24px" }}>
         {/* Tabs */}
         <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
-          <Tab label="🔩 螺絲軸力 & 彈簧選型" active={tab === "screw"} onClick={() => setTab("screw")} />
+          <Tab label="🔩🌀 螺絲軸力 & 彈簧選型" active={tab === "screw"} onClick={() => setTab("screw")} />
           <Tab label="🌀 線圈彈簧 k & 簧力計算" active={tab === "spring"} onClick={() => setTab("spring")} />
           <Tab label="🟨 矩形截面線圈彈簧"   active={tab === "rect"}      onClick={() => setTab("rect")} />
           <Tab label="🔶 碟形彈簧 Belleville"  active={tab === "belleville"} onClick={() => setTab("belleville")} />
