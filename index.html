@@ -267,6 +267,357 @@ const fmtK  = n => n >= 10000 ? n.toFixed(0) : n.toFixed(2);
 const sfColor = sf =>
   sf >= 1.5 ? C.green : sf >= 1.2 ? C.amber : C.red;
 
+// ════════════════════════════════════════════════════════════════════════════
+// STEP File Generation (AP203 Faceted BREP)
+// ════════════════════════════════════════════════════════════════════════════
+
+// Generate helical sweep mesh: profile (2D points) swept along helix
+// helixParams: { D (mean diam), pitch, turns, segPerTurn }
+// profile: array of [x, y] pairs (cross-section in local profile frame)
+function helicalSweepMesh({ D, pitch, turns, segPerTurn }, profile) {
+  const verts = [];   // [x,y,z]
+  const tris  = [];   // [i,j,k]
+  const radius = D / 2;
+  const totalSegs  = Math.round(turns * segPerTurn);
+  const profCount  = profile.length;
+
+  for (let i = 0; i <= totalSegs; i++) {
+    const t   = i / segPerTurn;             // turn count
+    const ang = t * 2 * Math.PI;
+    const z   = t * pitch;
+    const cosA = Math.cos(ang), sinA = Math.sin(ang);
+    // Tangent of helix
+    const tanX = -radius * sinA, tanY = radius * cosA, tanZ = pitch / (2 * Math.PI);
+    const tlen = Math.hypot(tanX, tanY, tanZ);
+    const tX = tanX / tlen, tY = tanY / tlen, tZ = tanZ / tlen;
+    // Normal (radial outward, projected to plane perp to tangent)
+    const nX = cosA, nY = sinA, nZ = 0;
+    // Binormal = tangent × normal
+    const bX = tY * nZ - tZ * nY;
+    const bY = tZ * nX - tX * nZ;
+    const bZ = tX * nY - tY * nX;
+
+    const cx = radius * cosA, cy = radius * sinA, cz = z;
+    for (const [px, py] of profile) {
+      verts.push([
+        cx + nX * px + bX * py,
+        cy + nY * px + bY * py,
+        cz + nZ * px + bZ * py,
+      ]);
+    }
+  }
+
+  // Triangulate quads between adjacent rings
+  for (let i = 0; i < totalSegs; i++) {
+    const r0 = i * profCount;
+    const r1 = (i + 1) * profCount;
+    for (let j = 0; j < profCount; j++) {
+      const a = r0 + j;
+      const b = r0 + (j + 1) % profCount;
+      const c = r1 + (j + 1) % profCount;
+      const d = r1 + j;
+      tris.push([a, b, c]);
+      tris.push([a, c, d]);
+    }
+  }
+
+  // End caps
+  const endStart = totalSegs * profCount;
+  const center0  = verts.length;
+  const startVerts = verts.slice(0, profCount);
+  const sx = startVerts.reduce((s, v) => s + v[0], 0) / profCount;
+  const sy = startVerts.reduce((s, v) => s + v[1], 0) / profCount;
+  const sz = startVerts.reduce((s, v) => s + v[2], 0) / profCount;
+  verts.push([sx, sy, sz]);
+
+  const endVerts = verts.slice(endStart, endStart + profCount);
+  const ex = endVerts.reduce((s, v) => s + v[0], 0) / profCount;
+  const ey = endVerts.reduce((s, v) => s + v[1], 0) / profCount;
+  const ez = endVerts.reduce((s, v) => s + v[2], 0) / profCount;
+  const centerE = verts.length;
+  verts.push([ex, ey, ez]);
+
+  for (let j = 0; j < profCount; j++) {
+    const a = j;
+    const b = (j + 1) % profCount;
+    tris.push([center0, b, a]);  // start cap (inward-facing)
+  }
+  for (let j = 0; j < profCount; j++) {
+    const a = endStart + j;
+    const b = endStart + (j + 1) % profCount;
+    tris.push([centerE, a, b]);  // end cap
+  }
+
+  return { verts, tris };
+}
+
+// Profile: circle of radius r, n points
+function circleProfile(r, n = 12) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = i * 2 * Math.PI / n;
+    pts.push([r * Math.cos(a), r * Math.sin(a)]);
+  }
+  return pts;
+}
+
+// Profile: rectangle a (axial) × b (radial), centered
+function rectProfile(a, b) {
+  const ha = a / 2, hb = b / 2;
+  return [[-hb, -ha], [hb, -ha], [hb, ha], [-hb, ha]];
+}
+
+// Generate a Belleville disc: truncated cone with inner & outer cylindrical edges
+function bellevilleMesh({ De, Di, t, h0, segs = 48 }) {
+  // Disc is a cone from inner radius up to outer radius, with thickness t
+  // Inner top at z = h0, outer top at z = 0
+  // Inner bottom at z = h0 - t, outer bottom at z = -t
+  const verts = [];
+  const tris  = [];
+  const ro = De / 2, ri = Di / 2;
+  // 4 rings of points: outer-top, inner-top, inner-bottom, outer-bottom
+  for (let i = 0; i < segs; i++) {
+    const a = i * 2 * Math.PI / segs;
+    const cosA = Math.cos(a), sinA = Math.sin(a);
+    verts.push([ro * cosA, ro * sinA, 0]);            // outer-top   (0..segs-1)
+    verts.push([ri * cosA, ri * sinA, h0]);           // inner-top   (segs..2segs-1)
+    verts.push([ri * cosA, ri * sinA, h0 - t]);       // inner-bot   (2segs..3segs-1)
+    verts.push([ro * cosA, ro * sinA, -t]);           // outer-bot   (3segs..4segs-1)
+  }
+  const stride = 4;
+  for (let i = 0; i < segs; i++) {
+    const j = (i + 1) % segs;
+    const i0 = i*stride, j0 = j*stride;
+    // Top cone (outer→inner top)
+    tris.push([i0+0, j0+0, j0+1]);
+    tris.push([i0+0, j0+1, i0+1]);
+    // Inner side (top→bottom inside)
+    tris.push([i0+1, j0+1, j0+2]);
+    tris.push([i0+1, j0+2, i0+2]);
+    // Bottom cone (inner→outer bottom)
+    tris.push([i0+2, j0+2, j0+3]);
+    tris.push([i0+2, j0+3, i0+3]);
+    // Outer side
+    tris.push([i0+3, j0+3, j0+0]);
+    tris.push([i0+3, j0+0, i0+0]);
+  }
+  return { verts, tris };
+}
+
+// Generate Wave Spring mesh (crest-to-crest multi-turn type)
+// OD, ID: outer/inner diameter, t: thickness, N: waves per turn,
+// n: number of turns, H0: free height
+// Each turn is a thin annular ring with sinusoidal wave in axial direction.
+// Adjacent turns stack with their crests touching (crest-to-crest).
+function waveSpringMesh({ OD, ID, t, N, n, H0, segs = 96 }) {
+  const verts = [];
+  const tris  = [];
+  const ro = OD / 2, ri = ID / 2;
+  // Per-turn: ring centred at z_turn, sine wave with amplitude amp around z_turn
+  // Wave amplitude: each turn occupies space (H0 - n*t) / n, half goes up/down
+  const turnSpace = (H0 - n * t) / Math.max(1, n);
+  const amp = turnSpace / 2;
+  // Turn centres
+  const turnCentres = [];
+  for (let k = 0; k < n; k++) {
+    // Stack with crest-to-crest: each turn's centre is offset by (amp*2 + t)
+    turnCentres.push(amp + k * (2 * amp + t));
+  }
+
+  for (let k = 0; k < n; k++) {
+    const zc = turnCentres[k];
+    // Phase shift between adjacent turns so crests align (k odd → flipped)
+    const phase = k % 2 === 0 ? 0 : Math.PI;
+    const ringStart = verts.length;
+    for (let i = 0; i < segs; i++) {
+      const a = i * 2 * Math.PI / segs;
+      const cosA = Math.cos(a), sinA = Math.sin(a);
+      const wave = amp * Math.sin(N * a + phase);
+      // Top surface
+      verts.push([ro * cosA, ro * sinA, zc + wave + t/2]);     // 0: outer-top
+      verts.push([ri * cosA, ri * sinA, zc + wave + t/2]);     // 1: inner-top
+      verts.push([ri * cosA, ri * sinA, zc + wave - t/2]);     // 2: inner-bot
+      verts.push([ro * cosA, ro * sinA, zc + wave - t/2]);     // 3: outer-bot
+    }
+    const stride = 4;
+    for (let i = 0; i < segs; i++) {
+      const j = (i + 1) % segs;
+      const i0 = ringStart + i*stride, j0 = ringStart + j*stride;
+      // Top face (annular, between outer-top → inner-top)
+      tris.push([i0+0, j0+0, j0+1]);
+      tris.push([i0+0, j0+1, i0+1]);
+      // Inner side (inner-top → inner-bot)
+      tris.push([i0+1, j0+1, j0+2]);
+      tris.push([i0+1, j0+2, i0+2]);
+      // Bottom face (inner-bot → outer-bot)
+      tris.push([i0+2, j0+2, j0+3]);
+      tris.push([i0+2, j0+3, i0+3]);
+      // Outer side (outer-bot → outer-top)
+      tris.push([i0+3, j0+3, j0+0]);
+      tris.push([i0+3, j0+0, i0+0]);
+    }
+  }
+  return { verts, tris };
+}
+
+// Compute triangle normal
+function triNormal(p1, p2, p3) {
+  const ux = p2[0]-p1[0], uy = p2[1]-p1[1], uz = p2[2]-p1[2];
+  const vx = p3[0]-p1[0], vy = p3[1]-p1[1], vz = p3[2]-p1[2];
+  const nx = uy*vz - uz*vy;
+  const ny = uz*vx - ux*vz;
+  const nz = ux*vy - uy*vx;
+  const len = Math.hypot(nx, ny, nz) || 1;
+  return [nx/len, ny/len, nz/len];
+}
+
+// Build a STEP AP203 file from a mesh (verts + tris)
+function buildStepFile(mesh, partName = "spring") {
+  const { verts, tris } = mesh;
+  const ts = new Date().toISOString().replace(/\.\d+Z$/, '');
+
+  // Helper to format floats consistently in STEP
+  const f = x => {
+    if (Math.abs(x) < 1e-12) return "0.";
+    const s = x.toFixed(6).replace(/\.?0+$/, '');
+    return s.includes('.') ? s : s + '.';
+  };
+
+  const lines = [];
+  const head = (id, txt) => lines.push(`#${id}=${txt};`);
+  let id = 0;
+  const nextId = () => ++id;
+
+  // Header
+  const header = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('${partName} - generated by Spring Screw Calculator'),'2;1');
+FILE_NAME('${partName}.step','${ts}',('Spring Screw Calculator'),('Auto-generated'),'JS-STEP-1.0','Spring Screw Calculator','');
+FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));
+ENDSEC;
+DATA;`;
+
+  // Application context boilerplate
+  const APP_CTX = nextId(); head(APP_CTX, "APPLICATION_CONTEXT('mechanical design')");
+  const APP_PROT = nextId(); head(APP_PROT, `APPLICATION_PROTOCOL_DEFINITION('international standard','config_control_design',2010,#${APP_CTX})`);
+  const MECH_CTX = nextId(); head(MECH_CTX, `MECHANICAL_CONTEXT('',#${APP_CTX},'mechanical')`);
+  const PROD = nextId(); head(PROD, `PRODUCT('${partName}','${partName}','',(#${MECH_CTX}))`);
+  const PROD_DEF_FORM = nextId(); head(PROD_DEF_FORM, `PRODUCT_DEFINITION_FORMATION_WITH_SPECIFIED_SOURCE('','',#${PROD},.NOT_KNOWN.)`);
+  const PROD_DEF_CTX = nextId(); head(PROD_DEF_CTX, `PRODUCT_DEFINITION_CONTEXT('part definition',#${APP_CTX},'design')`);
+  const PROD_DEF = nextId(); head(PROD_DEF, `PRODUCT_DEFINITION('design','',#${PROD_DEF_FORM},#${PROD_DEF_CTX})`);
+  const PROD_DEF_SHAPE = nextId(); head(PROD_DEF_SHAPE, `PRODUCT_DEFINITION_SHAPE('','',#${PROD_DEF})`);
+
+  // Length / angle / solid-angle unit definitions
+  const LEN_UNIT = nextId(); head(LEN_UNIT, "(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))");
+  const ANG_UNIT = nextId(); head(ANG_UNIT, "(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))");
+  const SOLID_UNIT = nextId(); head(SOLID_UNIT, "(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())");
+  const UNCERT = nextId(); head(UNCERT, `UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-7),#${LEN_UNIT},'distance_accuracy_value','confusion accuracy')`);
+  const GEO_CTX = nextId(); head(GEO_CTX, `(GEOMETRIC_REPRESENTATION_CONTEXT(3)GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#${UNCERT}))GLOBAL_UNIT_ASSIGNED_CONTEXT((#${LEN_UNIT},#${ANG_UNIT},#${SOLID_UNIT}))REPRESENTATION_CONTEXT('Context #1','3D Context'))`);
+
+  // Origin & default axes
+  const ORIGIN = nextId(); head(ORIGIN, "CARTESIAN_POINT('',(0.,0.,0.))");
+  const DIR_Z = nextId(); head(DIR_Z, "DIRECTION('',(0.,0.,1.))");
+  const DIR_X = nextId(); head(DIR_X, "DIRECTION('',(1.,0.,0.))");
+  const AXIS = nextId(); head(AXIS, `AXIS2_PLACEMENT_3D('',#${ORIGIN},#${DIR_Z},#${DIR_X})`);
+
+  // All vertices as CARTESIAN_POINT
+  const vertIds = verts.map(([x, y, z]) => {
+    const i = nextId();
+    head(i, `CARTESIAN_POINT('',(${f(x)},${f(y)},${f(z)}))`);
+    return i;
+  });
+
+  // Each triangle: POLY_LOOP → FACE_OUTER_BOUND → ADVANCED_FACE (PLANE)
+  const faceIds = [];
+  for (const [a, b, c] of tris) {
+    const p1 = verts[a], p2 = verts[b], p3 = verts[c];
+    const n  = triNormal(p1, p2, p3);
+
+    const ploop = nextId();
+    head(ploop, `POLY_LOOP('',(#${vertIds[a]},#${vertIds[b]},#${vertIds[c]}))`);
+    const fob = nextId();
+    head(fob, `FACE_OUTER_BOUND('',#${ploop},.T.)`);
+    // Per-face axis: origin at first vertex, normal as Z, edge1 as X
+    const fpt = nextId();
+    head(fpt, `CARTESIAN_POINT('',(${f(p1[0])},${f(p1[1])},${f(p1[2])}))`);
+    const fn = nextId();
+    head(fn, `DIRECTION('',(${f(n[0])},${f(n[1])},${f(n[2])}))`);
+    // x-axis = p2-p1 normalised
+    let ex = p2[0]-p1[0], ey = p2[1]-p1[1], ez = p2[2]-p1[2];
+    const elen = Math.hypot(ex,ey,ez) || 1;
+    ex/=elen; ey/=elen; ez/=elen;
+    const fx = nextId();
+    head(fx, `DIRECTION('',(${f(ex)},${f(ey)},${f(ez)}))`);
+    const fax = nextId();
+    head(fax, `AXIS2_PLACEMENT_3D('',#${fpt},#${fn},#${fx})`);
+    const plane = nextId();
+    head(plane, `PLANE('',#${fax})`);
+    const af = nextId();
+    head(af, `ADVANCED_FACE('',(#${fob}),#${plane},.T.)`);
+    faceIds.push(af);
+  }
+
+  const shell = nextId();
+  head(shell, `CLOSED_SHELL('',(${faceIds.map(i => `#${i}`).join(',')}))`);
+  const brep = nextId();
+  head(brep, `MANIFOLD_SOLID_BREP('${partName}',#${shell})`);
+  const arsr = nextId();
+  head(arsr, `ADVANCED_BREP_SHAPE_REPRESENTATION('',(#${AXIS},#${brep}),#${GEO_CTX})`);
+  const sdr = nextId();
+  head(sdr, `SHAPE_DEFINITION_REPRESENTATION(#${PROD_DEF_SHAPE},#${arsr})`);
+
+  return header + "\n" + lines.join("\n") + "\nENDSEC;\nEND-ISO-10303-21;\n";
+}
+
+// Trigger browser download
+function downloadStep(stepText, filename) {
+  const blob = new Blob([stepText], { type: "application/step" });
+  const url  = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Convenience: build & download for each spring type
+function downloadCoilSpringStep({ d, D, Na, end, L0 }, filename) {
+  const NeMap = { "閉合並磨平 (+2)": 2, "閉合端 (+2)": 2, "開放端 (+0)": 0, "開放磨平 (+1)": 1 };
+  const Ne   = NeMap[end] ?? 2;
+  const Nt   = Na + Ne;
+  const pitch = (L0 - Nt * d) / Na;     // working pitch
+  const profile = circleProfile(d / 2, 10);
+  const mesh = helicalSweepMesh(
+    { D, pitch: pitch + d, turns: Nt, segPerTurn: 20 },
+    profile
+  );
+  downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
+}
+
+function downloadRectSpringStep({ a, b, D, Na, end, L0 }, filename) {
+  const NeMap = { "閉合並磨平 (+2)": 2, "閉合端 (+2)": 2, "開放端 (+0)": 0, "開放磨平 (+1)": 1 };
+  const Ne   = NeMap[end] ?? 2;
+  const Nt   = Na + Ne;
+  const pitch = (L0 - Nt * a) / Na;
+  const profile = rectProfile(a, b);
+  const mesh = helicalSweepMesh(
+    { D, pitch: pitch + a, turns: Nt, segPerTurn: 20 },
+    profile
+  );
+  downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
+}
+
+function downloadBellevilleStep({ De, Di, t, h0 }, filename) {
+  const mesh = bellevilleMesh({ De, Di, t, h0, segs: 36 });
+  downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
+}
+
+function downloadWaveSpringStep({ OD, ID, t, N, n, H0 }, filename) {
+  // segs: enough resolution to capture N waves smoothly (≥ 8N)
+  const segs = Math.max(48, N * 12);
+  const mesh = waveSpringMesh({ OD, ID, t, N, n, H0, segs });
+  downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
+}
+
 // ── tiny components ──────────────────────────────────────────────────────────
 function Label({ children }) {
   return <span style={{ color: C.dim, fontSize: 11, fontFamily: "Courier New", letterSpacing: 1, textTransform: "uppercase" }}>{children}</span>;
@@ -534,6 +885,31 @@ function CalcButton({ onClick, children }) {
     }} onMouseEnter={e => e.target.style.opacity = ".85"}
        onMouseLeave={e => e.target.style.opacity = "1"}>
       {children}
+    </button>
+  );
+}
+
+// ── STEP file download button (CAD-themed) ──────────────────────────────────
+function StepDownloadButton({ onClick, label }) {
+  const [busy, setBusy] = useState(false);
+  const handle = async () => {
+    if (busy) return;
+    setBusy(true);
+    try { onClick(); }
+    finally { setTimeout(() => setBusy(false), 600); }
+  };
+  return (
+    <button onClick={handle} disabled={busy} style={{
+      background: busy ? C.border : `linear-gradient(135deg, ${C.gold}, ${C.amber})`,
+      border: "none", color: busy ? C.dim : C.navy,
+      padding: "9px 22px", borderRadius: 6,
+      cursor: busy ? "wait" : "pointer", fontFamily: "Courier New",
+      fontSize: 12, fontWeight: 700, letterSpacing: 1.5,
+      boxShadow: busy ? "none" : `0 3px 10px ${C.gold}55`,
+      transition: "all .2s", display: "inline-flex", alignItems: "center", gap: 8,
+    }}>
+      <span style={{ fontSize: 14 }}>📥</span>
+      {busy ? "GENERATING..." : (label || "下載 3D CAD (.step)")}
     </button>
   );
 }
@@ -1318,6 +1694,38 @@ function SpringModule() {
               )}
             </div>
           </Card>
+
+          {/* CAD download */}
+          <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
+            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <StepDownloadButton
+                onClick={() => {
+                  const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
+                  const fname = `CoilSpring_d${res.d}_OD${fmt2(res.OD)}_L${res.L0}_${ts}.step`;
+                  downloadCoilSpringStep(
+                    { d: res.d, D: res.D, Na: res.Na, end: res.end || end, L0: res.L0 },
+                    fname
+                  );
+                  if (res.mix && res.bSpring) {
+                    setTimeout(() => {
+                      const fnameB = `CoilSpring_B_d${res.bSpring.d}_OD${fmt2(res.bSpring.OD)}_L${res.bSpring.L0}_${ts}.step`;
+                      downloadCoilSpringStep(
+                        { d: res.bSpring.d, D: res.bSpring.D, Na: res.bSpring.Na, end: res.bSpring.end, L0: res.bSpring.L0 },
+                        fnameB
+                      );
+                    }, 800);
+                  }
+                }}
+                label={res.mix ? "下載 A+B 兩支 (.step)" : "下載 3D CAD (.step)"}
+              />
+              <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", lineHeight: 1.5 }}>
+                STEP AP203 格式 (Faceted BREP)<br />
+                支援 SolidWorks / Fusion 360 / Inventor / Creo<br />
+                可直接傳給彈簧廠商進行 CAM 加工
+              </div>
+            </div>
+          </Card>
         </div>
       )}
     </div>
@@ -1621,6 +2029,25 @@ function BellevilleModule() {
               k_avg ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt1(res.k_stack)} N/mm</span>
             </div>
           </Card>
+
+          {/* CAD download */}
+          <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
+            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <StepDownloadButton
+                onClick={() => {
+                  const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
+                  const fname = `Belleville_De${De}_Di${Di}_t${t}_h${h0}_${ts}.step`;
+                  downloadBellevilleStep({ De, Di, t, h0 }, fname);
+                }}
+                label="下載單片 3D CAD (.step)"
+              />
+              <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", lineHeight: 1.5 }}>
+                STEP AP203 格式 — 單片碟形彈簧<br />
+                堆疊配置請依「{res.nP} 並聯 × {res.nS} 串聯」自行組裝
+              </div>
+            </div>
+          </Card>
         </div>
       )}
     </div>
@@ -1834,6 +2261,27 @@ function WaveModule() {
               自由高 H₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.H0} mm</span>（實體高 {fmt2(res.n * res.t)} mm）<br />
               彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt2(res.k)} N/mm</span><br />
               工作行程 s ＝ {fmt2(res.s)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt1(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+            </div>
+          </Card>
+
+          {/* CAD download */}
+          <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
+            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <StepDownloadButton
+                onClick={() => {
+                  const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
+                  const fname = `WaveSpring_OD${res.OD}_ID${res.ID}_N${res.N}_n${res.n}_${ts}.step`;
+                  downloadWaveSpringStep(
+                    { OD: res.OD, ID: res.ID, t: res.t, N: res.N, n: res.n, H0: res.H0 },
+                    fname
+                  );
+                }}
+              />
+              <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", lineHeight: 1.5 }}>
+                STEP AP203 格式 (Faceted BREP)<br />
+                Crest-to-crest 多圈波形堆疊，可直接交廠商加工
+              </div>
             </div>
           </Card>
         </div>
@@ -2145,6 +2593,27 @@ function RectSpringModule() {
               彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span>
               （β = {fmt3(res.beta)}）<br />
               工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
+            </div>
+          </Card>
+
+          {/* CAD download */}
+          <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
+            <SectionTitle icon="🏭">3D CAD 模型下載</SectionTitle>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <StepDownloadButton
+                onClick={() => {
+                  const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
+                  const fname = `RectSpring_${res.t_axial}x${res.b_radial}_OD${fmt2(res.OD)}_L${res.L0}_${ts}.step`;
+                  downloadRectSpringStep(
+                    { a: res.t_axial, b: res.b_radial, D, Na, end: res.end, L0: res.L0 },
+                    fname
+                  );
+                }}
+              />
+              <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", lineHeight: 1.5 }}>
+                STEP AP203 格式 (Faceted BREP)<br />
+                矩形截面螺旋掃掠生成，可直接交廠商加工
+              </div>
             </div>
           </Card>
         </div>
