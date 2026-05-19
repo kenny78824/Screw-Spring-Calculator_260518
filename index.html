@@ -537,9 +537,7 @@ DATA;`;
     head(ploop, `POLY_LOOP('',(#${vertIds[a]},#${vertIds[b]},#${vertIds[c]}))`);
     const fob = nextId();
     head(fob, `FACE_OUTER_BOUND('',#${ploop},.T.)`);
-    // Per-face axis: origin at first vertex, normal as Z, edge1 as X
-    const fpt = nextId();
-    head(fpt, `CARTESIAN_POINT('',(${f(p1[0])},${f(p1[1])},${f(p1[2])}))`);
+    // Reuse the first vertex as face origin (avoids duplicate CARTESIAN_POINT)
     const fn = nextId();
     head(fn, `DIRECTION('',(${f(n[0])},${f(n[1])},${f(n[2])}))`);
     // x-axis = p2-p1 normalised
@@ -549,7 +547,7 @@ DATA;`;
     const fx = nextId();
     head(fx, `DIRECTION('',(${f(ex)},${f(ey)},${f(ez)}))`);
     const fax = nextId();
-    head(fax, `AXIS2_PLACEMENT_3D('',#${fpt},#${fn},#${fx})`);
+    head(fax, `AXIS2_PLACEMENT_3D('',#${vertIds[a]},#${fn},#${fx})`);
     const plane = nextId();
     head(plane, `PLANE('',#${fax})`);
     const af = nextId();
@@ -584,10 +582,12 @@ function downloadCoilSpringStep({ d, D, Na, end, L0 }, filename) {
   const NeMap = { "閉合並磨平 (+2)": 2, "閉合端 (+2)": 2, "開放端 (+0)": 0, "開放磨平 (+1)": 1 };
   const Ne   = NeMap[end] ?? 2;
   const Nt   = Na + Ne;
-  const pitch = (L0 - Nt * d) / Na;     // working pitch
-  const profile = circleProfile(d / 2, 10);
+  const pitch = (L0 - Nt * d) / Na;
+  // High-quality mesh: 24-point circular cross-section, 36 segments per helix turn
+  // (≈ 15° per profile step, ≈ 10° per helix step) → looks smooth at any zoom level
+  const profile = circleProfile(d / 2, 24);
   const mesh = helicalSweepMesh(
-    { D, pitch: pitch + d, turns: Nt, segPerTurn: 20 },
+    { D, pitch: pitch + d, turns: Nt, segPerTurn: 36 },
     profile
   );
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
@@ -598,22 +598,25 @@ function downloadRectSpringStep({ a, b, D, Na, end, L0 }, filename) {
   const Ne   = NeMap[end] ?? 2;
   const Nt   = Na + Ne;
   const pitch = (L0 - Nt * a) / Na;
-  const profile = rectProfile(a, b);
+  const profile = rectProfile(a, b);    // 4-corner rectangular section
+  // For rectangular wire the visible faceting comes only from the helix curve,
+  // so we use higher helix resolution (48/turn)
   const mesh = helicalSweepMesh(
-    { D, pitch: pitch + a, turns: Nt, segPerTurn: 20 },
+    { D, pitch: pitch + a, turns: Nt, segPerTurn: 48 },
     profile
   );
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
 
 function downloadBellevilleStep({ De, Di, t, h0 }, filename) {
-  const mesh = bellevilleMesh({ De, Di, t, h0, segs: 36 });
+  // 72 segments → 5° between points (very smooth circular edge)
+  const mesh = bellevilleMesh({ De, Di, t, h0, segs: 72 });
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
 
 function downloadWaveSpringStep({ OD, ID, t, N, n, H0 }, filename) {
-  // segs: enough resolution to capture N waves smoothly (≥ 8N)
-  const segs = Math.max(48, N * 12);
+  // 18 segments per wave (was 12) → far smoother sine curves
+  const segs = Math.max(72, N * 18);
   const mesh = waveSpringMesh({ OD, ID, t, N, n, H0, segs });
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
