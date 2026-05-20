@@ -40,7 +40,8 @@
     "imports": {
       "react":            "https://esm.sh/react@18.3.1",
       "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-      "recharts":         "https://esm.sh/recharts@2.12.7?deps=react@18.3.1"
+      "recharts":         "https://esm.sh/recharts@2.12.7?deps=react@18.3.1",
+      "three":            "https://esm.sh/three@0.160.0"
     }
   }
   </script>
@@ -52,6 +53,7 @@
       LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
       ReferenceLine, ReferenceDot, ResponsiveContainer, BarChart, Bar, Cell, Legend
     } from "recharts";
+    import * as THREE from "three";
 
 // ── palette ────────────────────────────────────────────────────────────────
 const C = {
@@ -274,28 +276,49 @@ const sfColor = sf =>
 // STEP File Generation (AP203 Faceted BREP)
 // ════════════════════════════════════════════════════════════════════════════
 
-// Generate helical sweep mesh: profile (2D points) swept along helix
-// helixParams: { D (mean diam), pitch, turns, segPerTurn }
-// profile: array of [x, y] pairs (cross-section in local profile frame)
-function helicalSweepMesh({ D, pitch, turns, segPerTurn }, profile) {
+// Generate helical sweep mesh.
+// pitchSegments: optional array of {turns, pitch} describing variable-pitch sections.
+// If provided, the helix uses these segments in sequence (for closed-end springs).
+// Otherwise, uses uniform `pitch` for `turns` turns.
+// grindEnds: when true, clamp z values to [0, totalLength] — simulates the
+//   "ground-flat" finish where end coils are physically ground down to form
+//   a flat seating surface perpendicular to the spring axis.
+function helicalSweepMesh({ D, pitch, turns, segPerTurn, pitchSegments, grindEnds }, profile) {
   const verts = [];   // [x,y,z]
   const tris  = [];   // [i,j,k]
   const radius = D / 2;
-  const totalSegs  = Math.round(turns * segPerTurn);
-  const profCount  = profile.length;
+  const profCount = profile.length;
 
-  for (let i = 0; i <= totalSegs; i++) {
-    const t   = i / segPerTurn;             // turn count
-    const ang = t * 2 * Math.PI;
-    const z   = t * pitch;
+  // Build segment list (uniform path if no pitchSegments given)
+  const segs = pitchSegments && pitchSegments.length
+    ? pitchSegments
+    : [{ turns, pitch }];
+
+  // Walk along all segments to build a unified path of {ang, z, pitch_local}
+  const path = [{ ang: 0, z: 0, pitch: segs[0].pitch }];
+  let angAccum = 0, zAccum = 0;
+  for (const s of segs) {
+    const subSegs = Math.max(1, Math.round(s.turns * segPerTurn));
+    const dAng = s.turns * 2 * Math.PI / subSegs;
+    const dZ   = s.turns * s.pitch / subSegs;
+    for (let i = 0; i < subSegs; i++) {
+      angAccum += dAng;
+      zAccum   += dZ;
+      path.push({ ang: angAccum, z: zAccum, pitch: s.pitch });
+    }
+  }
+  const totalSegs = path.length - 1;
+  // Total length along the helix axis (the "L0" of the spring)
+  const totalLength = path[path.length - 1].z;
+
+  // Emit vertices along path (use local pitch for proper helix tangent)
+  for (const pt of path) {
+    const { ang, z, pitch: pLocal } = pt;
     const cosA = Math.cos(ang), sinA = Math.sin(ang);
-    // Tangent of helix
-    const tanX = -radius * sinA, tanY = radius * cosA, tanZ = pitch / (2 * Math.PI);
+    const tanX = -radius * sinA, tanY = radius * cosA, tanZ = pLocal / (2 * Math.PI);
     const tlen = Math.hypot(tanX, tanY, tanZ);
     const tX = tanX / tlen, tY = tanY / tlen, tZ = tanZ / tlen;
-    // Normal (radial outward, projected to plane perp to tangent)
     const nX = cosA, nY = sinA, nZ = 0;
-    // Binormal = tangent × normal
     const bX = tY * nZ - tZ * nY;
     const bY = tZ * nX - tX * nZ;
     const bZ = tX * nY - tY * nX;
@@ -324,19 +347,29 @@ function helicalSweepMesh({ D, pitch, turns, segPerTurn }, profile) {
     }
   }
 
+  // Apply "ground flat" surface treatment by clamping z to [0, totalLength]
+  // This flattens the wire surface where it would dip below the seating plane,
+  // visually replicating the squared-and-ground finish.
+  if (grindEnds) {
+    for (const v of verts) {
+      if (v[2] < 0)            v[2] = 0;
+      if (v[2] > totalLength)  v[2] = totalLength;
+    }
+  }
+
   // End caps
   const endStart = totalSegs * profCount;
   const center0  = verts.length;
   const startVerts = verts.slice(0, profCount);
   const sx = startVerts.reduce((s, v) => s + v[0], 0) / profCount;
   const sy = startVerts.reduce((s, v) => s + v[1], 0) / profCount;
-  const sz = startVerts.reduce((s, v) => s + v[2], 0) / profCount;
+  const sz = grindEnds ? 0 : startVerts.reduce((s, v) => s + v[2], 0) / profCount;
   verts.push([sx, sy, sz]);
 
   const endVerts = verts.slice(endStart, endStart + profCount);
   const ex = endVerts.reduce((s, v) => s + v[0], 0) / profCount;
   const ey = endVerts.reduce((s, v) => s + v[1], 0) / profCount;
-  const ez = endVerts.reduce((s, v) => s + v[2], 0) / profCount;
+  const ez = grindEnds ? totalLength : endVerts.reduce((s, v) => s + v[2], 0) / profCount;
   const centerE = verts.length;
   verts.push([ex, ey, ez]);
 
@@ -581,47 +614,103 @@ function downloadStep(stepText, filename) {
 }
 
 // Convenience: build & download for each spring type
+//
+// End-coil handling (key for "closed" / "closed-and-ground" springs):
+//   開放端 (+0): uniform pitch end-to-end
+//   開放磨平 (+1): one ground turn (pitch = wireDiam) at each end
+//   閉合端 (+2): one fully closed turn (pitch ≈ wireDiam) at each end
+//   閉合並磨平 (+2): same as 閉合端 plus ground flat (visually identical in mesh)
+//
+// To express closed ends in the mesh, we use a variable-pitch helix:
+//   [end_segment (pitch ≈ d)] → [active coils (working pitch)] → [end_segment]
+function buildPitchSegments(wireDiam, activeTurns, totalLength, end) {
+  // Number of "end coils" on each side
+  let endTurnsEach = 0;
+  if (end === "閉合端 (+2)" || end === "閉合並磨平 (+2)")  endTurnsEach = 1;   // 1 closed turn each side
+  else if (end === "開放磨平 (+1)")                        endTurnsEach = 0.5; // half flat turn each side
+  // 開放端 (+0): no end coils
+
+  const closedTurnsTotal = endTurnsEach * 2;
+  // End-coil pitch ≈ wire diameter (turns touch each other)
+  const closedPitch  = wireDiam;
+  // Working pitch = remaining length distributed over active coils
+  const remainingLen = totalLength - closedTurnsTotal * closedPitch;
+  const workingPitch = activeTurns > 0 ? remainingLen / activeTurns : closedPitch;
+
+  if (endTurnsEach > 0) {
+    return [
+      { turns: endTurnsEach, pitch: closedPitch },
+      { turns: activeTurns,  pitch: workingPitch },
+      { turns: endTurnsEach, pitch: closedPitch },
+    ];
+  }
+  return [{ turns: activeTurns, pitch: workingPitch }];
+}
+
 function downloadCoilSpringStep({ d, D, Na, end, L0 }, filename) {
-  const NeMap = { "閉合並磨平 (+2)": 2, "閉合端 (+2)": 2, "開放端 (+0)": 0, "開放磨平 (+1)": 1 };
-  const Ne   = NeMap[end] ?? 2;
-  const Nt   = Na + Ne;
-  const pitch = (L0 - Nt * d) / Na;
-  // High-quality mesh: 24-point circular cross-section, 36 segments per helix turn
-  // (≈ 15° per profile step, ≈ 10° per helix step) → looks smooth at any zoom level
-  const profile = circleProfile(d / 2, 24);
+  const segments = buildPitchSegments(d, Na, L0, end);
+  // High-quality export: 72-point circular cross-section, 108 segments per helix turn
+  // (≈ 5° per profile step, ≈ 3.3° per helix step) — ~9× denser than v1
+  const profile = circleProfile(d / 2, 72);
+  const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
   const mesh = helicalSweepMesh(
-    { D, pitch: pitch + d, turns: Nt, segPerTurn: 36 },
+    { D, segPerTurn: 108, pitchSegments: segments, grindEnds },
     profile
   );
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
 
 function downloadRectSpringStep({ a, b, D, Na, end, L0 }, filename) {
-  const NeMap = { "閉合並磨平 (+2)": 2, "閉合端 (+2)": 2, "開放端 (+0)": 0, "開放磨平 (+1)": 1 };
-  const Ne   = NeMap[end] ?? 2;
-  const Nt   = Na + Ne;
-  const pitch = (L0 - Nt * a) / Na;
+  const segments = buildPitchSegments(a, Na, L0, end);
   const profile = rectProfile(a, b);    // 4-corner rectangular section
-  // For rectangular wire the visible faceting comes only from the helix curve,
-  // so we use higher helix resolution (48/turn)
+  // 144 segments per turn → 3× denser (profile is intrinsically 4 corners)
+  const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
   const mesh = helicalSweepMesh(
-    { D, pitch: pitch + a, turns: Nt, segPerTurn: 48 },
+    { D, segPerTurn: 144, pitchSegments: segments, grindEnds },
     profile
   );
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
 
 function downloadBellevilleStep({ De, Di, t, h0 }, filename) {
-  // 72 segments → 5° between points (very smooth circular edge)
-  const mesh = bellevilleMesh({ De, Di, t, h0, segs: 72 });
+  // 216 segments → 1.67° per division (3× denser)
+  const mesh = bellevilleMesh({ De, Di, t, h0, segs: 216 });
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
 
 function downloadWaveSpringStep({ OD, ID, t, N, n, H0 }, filename) {
-  // 18 segments per wave (was 12) → far smoother sine curves
-  const segs = Math.max(72, N * 18);
+  // 54 segments per wave (3× denser)
+  const segs = Math.max(216, N * 54);
   const mesh = waveSpringMesh({ OD, ID, t, N, n, H0, segs });
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
+}
+
+// ─── Mesh builders for 3D preview (lighter density than STEP export) ────────
+// The preview uses a lower-poly mesh for fast browser rendering.
+function buildCoilPreviewMesh({ d, D, Na, end, L0 }) {
+  const segments = buildPitchSegments(d, Na, L0, end);
+  const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
+  return helicalSweepMesh(
+    { D, segPerTurn: 24, pitchSegments: segments, grindEnds },
+    circleProfile(d / 2, 16)
+  );
+}
+
+function buildRectPreviewMesh({ a, b, D, Na, end, L0 }) {
+  const segments = buildPitchSegments(a, Na, L0, end);
+  const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
+  return helicalSweepMesh(
+    { D, segPerTurn: 32, pitchSegments: segments, grindEnds },
+    rectProfile(a, b)
+  );
+}
+
+function buildBellevillePreviewMesh({ De, Di, t, h0 }) {
+  return bellevilleMesh({ De, Di, t, h0, segs: 48 });
+}
+
+function buildWavePreviewMesh({ OD, ID, t, N, n, H0 }) {
+  return waveSpringMesh({ OD, ID, t, N, n, H0, segs: Math.max(48, N * 12) });
 }
 
 // ── tiny components ──────────────────────────────────────────────────────────
@@ -802,45 +891,170 @@ function SpringDiagram({ d, D, Na, L0, Lw, OD, Ls, Ne }) {
   );
 }
 
-// ── Force–Deflection chart ────────────────────────────────────────────────────
-function ForceChart({ k, delta, F, Ls, L0 }) {
-  const dMax   = L0 - Ls;
-  const points = Array.from({ length: 61 }, (_, i) => {
-    const x = (dMax * 1.05 * i) / 60;
-    return { x: +x.toFixed(3), F: +(k * x).toFixed(2) };
-  });
+// ── Force–Deflection chart (elastic + plastic regions) ─────────────────────
+// Optional props for plasticity overlay:
+// ── Force–Deflection chart (elastic + plastic + fracture regions) ─────────
+// Optional props for plasticity overlay:
+//   tau:     current working shear stress (MPa)
+//   Sut:     ultimate tensile strength of wire (MPa)
+//   F:       current working force (used to derive τ-per-F ratio)
+// When all three are supplied, the chart shows:
+//   1. Elastic region (sky-blue, slope = k) — up to δ_yield
+//   2. Plastic region (amber, slope = k·5%) — yield → ULT
+//   3. Fracture region (red, F decays from F_ult to 0) — ULT → rupture
+function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
+  const dMax = L0 - Ls;
+
+  // ─── Compute elastic / plastic / fracture transitions ─────────────────────
+  // Shear yield ≈ 0.45 × Sut, shear ultimate ≈ 0.65 × Sut (Wahl values)
+  let deltaYield = Infinity, F_yield = Infinity;
+  let deltaUlt   = Infinity, F_ult   = Infinity;
+  let deltaBreak = Infinity;          // total fracture deflection
+  const havePlastic = (tau > 0 && Sut > 0 && F > 0 && k > 0);
+  if (havePlastic) {
+    const tauPerF  = tau / F;
+    const tauYield = 0.45 * Sut;
+    const tauUlt   = 0.65 * Sut;
+    F_yield   = tauYield / tauPerF;
+    F_ult     = tauUlt / tauPerF;
+    deltaYield = F_yield / k;
+    // Plastic region length: 5% strain-hardening slope between yield and ULT
+    deltaUlt   = deltaYield + (F_ult - F_yield) / (k * 0.05);
+    // Fracture region: necking — F drops from F_ult to 0 over a length
+    // typically 40–80% of the plastic region. Use 0.6 × (deltaUlt - deltaYield).
+    const necking = 0.6 * (deltaUlt - deltaYield);
+    deltaBreak = deltaUlt + necking;
+  }
+
+  // X-axis upper bound: include the fracture tail when plasticity is shown
+  const xUpper = havePlastic
+    ? Math.max(dMax * 1.05, deltaBreak * 1.05)
+    : dMax * 1.05;
+
+  // Build curve points — three series so each region gets its own colour
+  const N = 100;
+  const k_p = k * 0.05;                          // plastic slope
+  const points = [];
+  for (let i = 0; i <= N; i++) {
+    const x = (xUpper * i) / N;
+    let Felastic = null, Fplastic = null, Ffracture = null;
+
+    if (!havePlastic) {
+      Felastic = +(k * x).toFixed(2);
+    } else if (x <= deltaYield) {
+      Felastic = +(k * x).toFixed(2);
+    } else if (x <= deltaUlt) {
+      Fplastic = +(F_yield + (x - deltaYield) * k_p).toFixed(2);
+    } else if (x <= deltaBreak) {
+      // Smooth decay from F_ult → 0 (cosine half-wave for visual quality)
+      const u = (x - deltaUlt) / (deltaBreak - deltaUlt);  // 0..1
+      const Fval = F_ult * 0.5 * (1 + Math.cos(Math.PI * u));
+      Ffracture = +Fval.toFixed(2);
+    } else {
+      Ffracture = 0;
+    }
+    points.push({ x: +x.toFixed(3), F: Felastic, Fp: Fplastic, Ff: Ffracture });
+  }
+
+  // Insert exact transition points so segments touch cleanly
+  if (havePlastic) {
+    if (deltaYield <= xUpper)
+      points.push({ x: +deltaYield.toFixed(3), F: +F_yield.toFixed(2), Fp: +F_yield.toFixed(2), Ff: null });
+    if (deltaUlt <= xUpper)
+      points.push({ x: +deltaUlt.toFixed(3),   F: null, Fp: +F_ult.toFixed(2),   Ff: +F_ult.toFixed(2) });
+    if (deltaBreak <= xUpper)
+      points.push({ x: +deltaBreak.toFixed(3), F: null, Fp: null,                 Ff: 0 });
+    points.sort((a, b) => a.x - b.x);
+  }
 
   const CustomDot = ({ cx, cy, payload }) => {
+    if (payload.F === null || payload.F === undefined) return null;
     if (Math.abs(payload.x - delta) > dMax * 0.018) return null;
     return <circle cx={cx} cy={cy} r={6} fill={C.red} stroke="#fff" strokeWidth={2} />;
   };
 
   const TooltipContent = ({ active, payload }) => {
     if (!active || !payload?.length) return null;
-    const { x, F: fv } = payload[0].payload;
+    const d = payload[0].payload;
+    const phase = havePlastic
+      ? (d.x <= deltaYield ? "彈性"
+         : d.x <= deltaUlt   ? "塑性"
+         : d.x <= deltaBreak ? "頸縮"
+         :                     "斷裂")
+      : "彈性";
+    const Fv = d.Ff !== null && d.Ff !== undefined ? d.Ff
+             : d.Fp !== null && d.Fp !== undefined ? d.Fp
+             : d.F;
+    const phaseColor =
+      phase === "彈性" ? C.sky :
+      phase === "塑性" ? C.amber :
+      phase === "頸縮" ? C.red :
+                        C.dim;
     return (
-      <div style={{ background: C.navy, border: `1px solid ${C.border}`, padding: "8px 12px", borderRadius: 4, fontFamily: "Courier New", fontSize: 12 }}>
-        <div style={{ color: C.dim }}>δ = <span style={{ color: C.text }}>{x} mm</span></div>
-        <div style={{ color: C.dim }}>F = <span style={{ color: C.ice }}>{fv} N</span></div>
+      <div style={{ background: C.navy, border: `1px solid ${C.border}`, padding: "8px 12px", borderRadius: 4, fontFamily: '"JetBrains Mono", monospace', fontSize: 12 }}>
+        <div style={{ color: C.dim }}>δ = <span style={{ color: C.text }}>{d.x} mm</span></div>
+        <div style={{ color: C.dim }}>F = <span style={{ color: C.ice }}>{Fv ?? "-"} N</span></div>
+        <div style={{ color: phaseColor, fontSize: 10, marginTop: 3 }}>● {phase}區</div>
       </div>
     );
   };
 
   return (
-    <ResponsiveContainer width="100%" height={200}>
-      <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-        <XAxis dataKey="x" stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
-               label={{ value: "δ (mm)", position: "insideBottomRight", offset: -4, fill: C.dim, fontSize: 10 }} />
-        <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
-               label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
-        <Tooltip content={<TooltipContent />} />
-        <ReferenceLine x={dMax} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.5} label={{ value: "Ls", fill: C.amber, fontSize: 9 }} />
-        <ReferenceDot x={delta} y={F} r={0} />
-        <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
-              dot={<CustomDot />} activeDot={{ r: 4, fill: C.ice }} />
-      </LineChart>
-    </ResponsiveContainer>
+    <div>
+      <ResponsiveContainer width="100%" height={220}>
+        <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+          <XAxis type="number" dataKey="x" domain={[0, xUpper]} stroke={C.dim}
+                 tick={{ fill: C.dim, fontSize: 10, fontFamily: "JetBrains Mono" }}
+                 label={{ value: "δ (mm)", position: "insideBottomRight", offset: -4, fill: C.dim, fontSize: 10 }} />
+          <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "JetBrains Mono" }}
+                 label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
+          <Tooltip content={<TooltipContent />} />
+          <ReferenceLine x={dMax} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.5}
+                         label={{ value: "Ls", fill: C.amber, fontSize: 9, position: "top" }} />
+          {havePlastic && deltaYield < xUpper && (
+            <ReferenceLine x={deltaYield} stroke={C.green} strokeDasharray="3 3" strokeWidth={1.2}
+                           label={{ value: "降伏", fill: C.green, fontSize: 9, position: "top" }} />
+          )}
+          {havePlastic && deltaUlt <= xUpper && (
+            <ReferenceLine x={deltaUlt} stroke={C.red} strokeDasharray="3 3" strokeWidth={1.2}
+                           label={{ value: "極限", fill: C.red, fontSize: 9, position: "top" }} />
+          )}
+          {havePlastic && deltaBreak <= xUpper && (
+            <ReferenceLine x={deltaBreak} stroke="#777" strokeDasharray="3 3" strokeWidth={1.2}
+                           label={{ value: "斷裂", fill: "#999", fontSize: 9, position: "top" }} />
+          )}
+          <ReferenceDot x={delta} y={F} r={0} />
+          {/* Elastic */}
+          <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
+                connectNulls={false} isAnimationActive={false}
+                dot={<CustomDot />} activeDot={{ r: 4, fill: C.ice }} />
+          {/* Plastic */}
+          {havePlastic && (
+            <Line type="monotone" dataKey="Fp" stroke={C.amber} strokeWidth={2.5}
+                  strokeDasharray="6 3" connectNulls={false} isAnimationActive={false}
+                  dot={false} activeDot={{ r: 4, fill: C.amber }} />
+          )}
+          {/* Fracture (necking) */}
+          {havePlastic && (
+            <Line type="monotone" dataKey="Ff" stroke={C.red} strokeWidth={2.5}
+                  strokeDasharray="2 3" connectNulls={false} isAnimationActive={false}
+                  dot={false} activeDot={{ r: 4, fill: C.red }} />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
+      {havePlastic && (
+        <div style={{ marginTop: 6, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap",
+                      fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>
+          <span style={{ color: C.sky }}>━ 彈性</span>
+          <span style={{ color: C.amber }}>┅ 塑性 (k·5%)</span>
+          <span style={{ color: C.red }}>┄ 頸縮破壞</span>
+          <span style={{ color: C.green }}>│ 降伏 δ={deltaYield.toFixed(2)}</span>
+          <span style={{ color: C.red }}>│ 極限 δ={deltaUlt.toFixed(2)}</span>
+          <span style={{ color: "#999" }}>│ 斷裂 δ={deltaBreak.toFixed(2)}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -869,6 +1083,280 @@ function StressChart({ tau, tauAllow, Sut }) {
       </BarChart>
     </ResponsiveContainer>
   );
+}
+
+// ── 3D Mesh Viewer (Three.js) ────────────────────────────────────────────
+// Receives a {verts, tris} mesh and renders it in an interactive WebGL canvas
+// with orbit (left-drag), zoom (wheel), pan (right-drag).
+function ThreeViewer({ mesh, height = 360 }) {
+  const mountRef = useRef(null);
+  const sceneStateRef = useRef(null);
+
+  useEffect(() => {
+    if (!mesh || !mountRef.current) return;
+    if (!window.THREE) return;
+
+    const THREE = window.THREE;
+    const mount = mountRef.current;
+    const w = mount.clientWidth, h = height;
+
+    // --- Scene setup --------------------------------------------------------
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0A1929);
+
+    // --- Camera -------------------------------------------------------------
+    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
+
+    // --- Lights -------------------------------------------------------------
+    scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+    const dir1 = new THREE.DirectionalLight(0xffffff, 0.85);
+    dir1.position.set(1, 1.5, 1).normalize();
+    scene.add(dir1);
+    const dir2 = new THREE.DirectionalLight(0x7BB8E8, 0.35);
+    dir2.position.set(-1, -0.5, -1).normalize();
+    scene.add(dir2);
+
+    // --- Build geometry from {verts, tris} ---------------------------------
+    const geom = new THREE.BufferGeometry();
+    const positions = new Float32Array(mesh.tris.length * 3 * 3);
+    for (let i = 0; i < mesh.tris.length; i++) {
+      const [a, b, c] = mesh.tris[i];
+      const va = mesh.verts[a], vb = mesh.verts[b], vc = mesh.verts[c];
+      positions[i*9 + 0] = va[0]; positions[i*9 + 1] = va[1]; positions[i*9 + 2] = va[2];
+      positions[i*9 + 3] = vb[0]; positions[i*9 + 4] = vb[1]; positions[i*9 + 5] = vb[2];
+      positions[i*9 + 6] = vc[0]; positions[i*9 + 7] = vc[1]; positions[i*9 + 8] = vc[2];
+    }
+    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geom.computeVertexNormals();
+
+    const material = new THREE.MeshPhongMaterial({
+      color: 0x6FA8DC, specular: 0x222222, shininess: 35,
+      flatShading: false, side: THREE.DoubleSide,
+    });
+    const obj = new THREE.Mesh(geom, material);
+    scene.add(obj);
+
+    // Wireframe overlay (subtle)
+    const wireMat = new THREE.LineBasicMaterial({ color: 0x1B3A5C, transparent: true, opacity: 0.25 });
+    const wireGeom = new THREE.WireframeGeometry(geom);
+    const wireObj = new THREE.LineSegments(wireGeom, wireMat);
+    scene.add(wireObj);
+
+    // --- Compute bounding sphere & center the object -----------------------
+    geom.computeBoundingSphere();
+    const bs = geom.boundingSphere;
+    obj.position.set(-bs.center.x, -bs.center.y, -bs.center.z);
+    wireObj.position.copy(obj.position);
+    const objectRadius = bs.radius;
+
+    // --- Camera initial position --------------------------------------------
+    let cameraDistance = objectRadius * 2.6;
+    let cameraTheta = Math.PI * 0.25;  // azimuth
+    let cameraPhi   = Math.PI * 0.32;  // polar
+    const minDistance = objectRadius * 0.6;
+    const maxDistance = objectRadius * 10;
+
+    function updateCamera() {
+      camera.position.x = cameraDistance * Math.sin(cameraPhi) * Math.sin(cameraTheta);
+      camera.position.y = cameraDistance * Math.cos(cameraPhi);
+      camera.position.z = cameraDistance * Math.sin(cameraPhi) * Math.cos(cameraTheta);
+      camera.lookAt(0, 0, 0);
+    }
+    updateCamera();
+
+    // --- Reference grid -----------------------------------------------------
+    const gridSize = objectRadius * 2.5;
+    const grid = new THREE.GridHelper(gridSize, 10, 0x1E3A5A, 0x142A48);
+    grid.position.y = -objectRadius * 1.1;
+    scene.add(grid);
+
+    // --- Axes helper --------------------------------------------------------
+    const axes = new THREE.AxesHelper(objectRadius * 0.4);
+    axes.position.copy(grid.position);
+    scene.add(axes);
+
+    // --- Renderer -----------------------------------------------------------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(w, h);
+    mount.appendChild(renderer.domElement);
+    renderer.domElement.style.display = "block";
+    renderer.domElement.style.borderRadius = "4px";
+
+    // --- Mouse interaction --------------------------------------------------
+    let dragging = false;
+    let dragButton = 0;
+    let lastX = 0, lastY = 0;
+    const onDown = (e) => {
+      dragging = true;
+      dragButton = e.button;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      e.preventDefault();
+    };
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (dragButton === 0) {
+        // Orbit
+        cameraTheta -= dx * 0.01;
+        cameraPhi   = Math.max(0.05, Math.min(Math.PI - 0.05, cameraPhi - dy * 0.01));
+        updateCamera();
+      }
+    };
+    const onUp = () => { dragging = false; };
+    const onWheel = (e) => {
+      e.preventDefault();
+      const k = e.deltaY > 0 ? 1.12 : 0.89;
+      cameraDistance = Math.max(minDistance, Math.min(maxDistance, cameraDistance * k));
+      updateCamera();
+    };
+
+    // Touch support (single-finger orbit, pinch zoom)
+    let lastTouchDist = 0;
+    const onTouchStart = (e) => {
+      if (e.touches.length === 1) {
+        dragging = true; dragButton = 0;
+        lastX = e.touches[0].clientX;
+        lastY = e.touches[0].clientY;
+      } else if (e.touches.length === 2) {
+        dragging = false;
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastTouchDist = Math.hypot(dx, dy);
+      }
+    };
+    const onTouchMove = (e) => {
+      if (e.touches.length === 1 && dragging) {
+        const tx = e.touches[0].clientX, ty = e.touches[0].clientY;
+        cameraTheta -= (tx - lastX) * 0.01;
+        cameraPhi   = Math.max(0.05, Math.min(Math.PI - 0.05, cameraPhi - (ty - lastY) * 0.01));
+        lastX = tx; lastY = ty;
+        updateCamera();
+        e.preventDefault();
+      } else if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const dist = Math.hypot(dx, dy);
+        if (lastTouchDist > 0) {
+          const k = lastTouchDist / dist;
+          cameraDistance = Math.max(minDistance, Math.min(maxDistance, cameraDistance * k));
+          updateCamera();
+        }
+        lastTouchDist = dist;
+        e.preventDefault();
+      }
+    };
+    const onTouchEnd = () => { dragging = false; lastTouchDist = 0; };
+
+    renderer.domElement.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
+    renderer.domElement.addEventListener("contextmenu", e => e.preventDefault());
+    renderer.domElement.addEventListener("touchstart", onTouchStart, { passive: false });
+    renderer.domElement.addEventListener("touchmove", onTouchMove, { passive: false });
+    renderer.domElement.addEventListener("touchend", onTouchEnd);
+
+    // --- Resize handling ----------------------------------------------------
+    const onResize = () => {
+      const newW = mount.clientWidth;
+      renderer.setSize(newW, height);
+      camera.aspect = newW / height;
+      camera.updateProjectionMatrix();
+    };
+    window.addEventListener("resize", onResize);
+
+    // --- Animation loop ------------------------------------------------------
+    let rafId;
+    const animate = () => {
+      rafId = requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    sceneStateRef.current = {
+      reset() {
+        cameraDistance = objectRadius * 2.6;
+        cameraTheta = Math.PI * 0.25;
+        cameraPhi   = Math.PI * 0.32;
+        updateCamera();
+      },
+    };
+
+    // --- Cleanup ------------------------------------------------------------
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("resize", onResize);
+      renderer.dispose();
+      geom.dispose();
+      wireGeom.dispose();
+      material.dispose();
+      wireMat.dispose();
+      if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
+    };
+  }, [mesh, height]);
+
+  // Initial loading hint if THREE not yet available
+  const [ready, setReady] = useState(typeof window !== "undefined" && !!window.THREE);
+  useEffect(() => {
+    if (ready) return;
+    if (typeof window === "undefined") return;
+    const tick = () => {
+      if (window.THREE) { setReady(true); }
+      else setTimeout(tick, 100);
+    };
+    tick();
+  }, [ready]);
+
+  return (
+    <div>
+      <div ref={mountRef} style={{
+        width: "100%", height,
+        background: "#0A1929",
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        position: "relative",
+        cursor: "grab",
+        overflow: "hidden",
+      }}>
+        {!ready && (
+          <div style={{
+            position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: C.dim, fontFamily: '"JetBrains Mono", monospace', fontSize: 11,
+          }}>
+            Loading 3D renderer…
+          </div>
+        )}
+      </div>
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        marginTop: 8, color: C.dim, fontSize: 10.5,
+        fontFamily: '"JetBrains Mono", monospace',
+      }}>
+        <span>🖱 拖曳旋轉 &nbsp;|&nbsp; 滾輪縮放 &nbsp;|&nbsp; 觸控雙指縮放</span>
+        <button
+          onClick={() => sceneStateRef.current?.reset()}
+          style={{
+            background: "transparent", border: `1px solid ${C.border}`,
+            color: C.dim, padding: "3px 10px", borderRadius: 3,
+            cursor: "pointer", fontFamily: '"JetBrains Mono", monospace', fontSize: 10,
+          }}
+        >↻ 重置視角</button>
+      </div>
+    </div>
+  );
+}
+
+// Helper: register THREE on window so ThreeViewer can use it
+if (typeof window !== "undefined" && typeof THREE !== "undefined") {
+  window.THREE = THREE;
 }
 
 // ── Tab button ────────────────────────────────────────────────────────────────
@@ -1852,6 +2340,7 @@ function SpringModule() {
               F={res.F_total}
               Ls={res.mix ? (res.Ls + res.bSpring.Ls) : res.Ls * res.nS}
               L0={res.L0_total}
+              tau={res.tau} Sut={res.Sut}
             />
             {(res.par || res.ser || res.mix) && (
               <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", marginTop: 6, textAlign: "right" }}>
@@ -1931,6 +2420,27 @@ function SpringModule() {
                 </>
               )}
             </div>
+          </Card>
+
+          {/* 3D Preview */}
+          <Card>
+            <SectionTitle icon="🧊">3D 預覽</SectionTitle>
+            <ThreeViewer mesh={buildCoilPreviewMesh({
+              d: res.d, D: res.D, Na: res.Na,
+              end: res.end || end, L0: res.L0,
+            })} />
+            {res.mix && res.bSpring && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{
+                  color: C.red, fontSize: 11, fontFamily: '"JetBrains Mono", monospace',
+                  marginBottom: 6, fontWeight: 700,
+                }}>▼ 彈簧 B 預覽</div>
+                <ThreeViewer mesh={buildCoilPreviewMesh({
+                  d: res.bSpring.d, D: res.bSpring.D, Na: res.bSpring.Na,
+                  end: res.bSpring.end, L0: res.bSpring.L0,
+                })} />
+              </div>
+            )}
           </Card>
 
           {/* CAD download */}
@@ -2278,6 +2788,14 @@ function BellevilleModule() {
             </div>
           </Card>
 
+          {/* 3D Preview */}
+          <Card>
+            <SectionTitle icon="🧊">3D 預覽（單片）</SectionTitle>
+            <ThreeViewer mesh={buildBellevillePreviewMesh({
+              De: res.De, Di: res.Di, t: res.t, h0: res.h0,
+            })} />
+          </Card>
+
           {/* CAD download */}
           <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
             <SectionTitle icon="💾">3D CAD 模型下載</SectionTitle>
@@ -2486,7 +3004,8 @@ function WaveModule() {
           {/* F vs s 線性 */}
           <Card>
             <SectionTitle icon="📈">力 vs 壓縮量</SectionTitle>
-            <ForceChart k={res.k} delta={res.s} F={res.F} Ls={res.n * res.t} L0={res.H0} />
+            <ForceChart k={res.k} delta={res.s} F={res.F} Ls={res.n * res.t} L0={res.H0}
+              tau={res.sigma} Sut={res.Sut_typ} />
           </Card>
 
           {/* 應力 */}
@@ -2511,6 +3030,14 @@ function WaveModule() {
               彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt2(res.k)} N/mm</span><br />
               工作行程 s ＝ {fmt2(res.s)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt1(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
             </div>
+          </Card>
+
+          {/* 3D Preview */}
+          <Card>
+            <SectionTitle icon="🧊">3D 預覽</SectionTitle>
+            <ThreeViewer mesh={buildWavePreviewMesh({
+              OD: res.OD, ID: res.ID, t: res.t, N: res.N, n: res.n, H0: res.H0,
+            })} />
           </Card>
 
           {/* CAD download */}
@@ -2817,7 +3344,8 @@ function RectSpringModule() {
           {/* Charts */}
           <Card>
             <SectionTitle icon="📈">簧力 vs 壓縮量</SectionTitle>
-            <ForceChart k={res.k} delta={res.delta} F={res.F} Ls={res.Ls} L0={res.L0} />
+            <ForceChart k={res.k} delta={res.delta} F={res.F} Ls={res.Ls} L0={res.L0}
+              tau={res.tau} Sut={res.Sut} />
           </Card>
 
           <Card>
@@ -2842,6 +3370,14 @@ function RectSpringModule() {
               （β = {fmt3(res.beta)}）<br />
               工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）
             </div>
+          </Card>
+
+          {/* 3D Preview */}
+          <Card>
+            <SectionTitle icon="🧊">3D 預覽</SectionTitle>
+            <ThreeViewer mesh={buildRectPreviewMesh({
+              a: res.t_axial, b: res.b_radial, D, Na, end: res.end, L0: res.L0,
+            })} />
           </Card>
 
           {/* CAD download */}
