@@ -2025,8 +2025,22 @@ function SpringModule() {
       }
     }
 
+    // ── 退磅與極限應力判定 ────────────────────────────────────────────
+    const Ls_A = Nt * d;
+    const tauUlt = 0.65 * Sut;
+    const isSolid     = Lw <= Ls_A;                         // 工作長 ≤ 實體高 = 已壓實
+    const isElastic   = r.tau < tauAllow;                   // tauAllow = 0.45 × Sut = τ_yield
+    const willDetorque = !isElastic || isSolid;
+    let detorqueReason;
+    if (isSolid && !isElastic)        detorqueReason = "壓實 + 塑性變形";
+    else if (isSolid)                 detorqueReason = "彈簧已壓實（無預壓力）";
+    else if (r.tau >= tauUlt)         detorqueReason = "頸縮：瀕臨斷裂";
+    else if (!isElastic)              detorqueReason = "塑性：永久變形";
+    else                              detorqueReason = "✓ 在彈性區、未壓實";
+
     setRes({
-      ...r, Sut, tauAllow, SF, Nt, Ls: Nt * d, Ne, mat, matData, L0, Lw, d, D, Na, end,
+      ...r, Sut, tauAllow, tauUlt, SF, Nt, Ls: Ls_A, Ne, mat, matData, L0, Lw, d, D, Na, end,
+      isSolid, isElastic, willDetorque, detorqueReason,
       par, ser, mix, nP: n_par, nS: ser ? nS : (mix ? 2 : 1),
       k_total: k_system, F_total: F_system,
       delta_total: delta_system, L0_total: L0_system, Lw_total: Lw_system,
@@ -2308,15 +2322,27 @@ function SpringModule() {
                   ["實體高 Ls", fmt2(res.Ls), "mm"],
                   ["工作應力 τ", fmt1(res.tau), "MPa"],
                   ["許用應力", fmt1(res.tauAllow), "MPa"],
-                ].map(([l, v, u]) => (
+                  ["極限應力 τ_ult", fmt1(res.tauUlt), "MPa"],
+                  ["螺絲退磅?", res.willDetorque ? "會" : "不會", "",
+                    res.willDetorque ? C.red : C.green],
+                ].map(([l, v, u, color]) => (
                   <div key={l}>
                     <Label>{l}</Label>
                     <div>
-                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      <span style={{ color: color || C.ice, fontFamily: "Courier New", fontSize: 13, fontWeight: color ? 700 : 400 }}>{v}</span>
                       {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
                     </div>
                   </div>
                 ))}
+              </div>
+              <div style={{
+                marginTop: 10, padding: "6px 10px",
+                background: (res.willDetorque ? C.red : C.green) + "18",
+                borderLeft: `3px solid ${res.willDetorque ? C.red : C.green}`,
+                borderRadius: 3, fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5,
+                color: res.willDetorque ? C.red : C.green,
+              }}>
+                {res.detorqueReason}
               </div>
             </Card>
 
@@ -2633,12 +2659,25 @@ function BellevilleModule() {
     // 簡化 SF 估算（使用平均強度 ~1500 MPa for spring steel）
     const Sut_typ     = m.coeff * Math.pow(t, m.exp);
     const sigma_allow = 0.85 * Sut_typ;   // Belleville 靜態許用
+    const sigma_ult   = Sut_typ;          // 極限應力 ≈ Sut
     const SF          = r.sigma_OM > 0 ? sigma_allow / r.sigma_OM : Infinity;
+
+    // ── 退磅與壓平判定 ─────────────────────────────────────────────
+    const isFlat       = s >= h0;                          // 壓平 (s = h0 即完全平展)
+    const isElastic    = r.sigma_OM < sigma_allow;         // 在許用範圍內
+    const willDetorque = !isElastic || isFlat;
+    let detorqueReason;
+    if (isFlat && !isElastic)    detorqueReason = "壓平 + 塑性變形";
+    else if (isFlat)             detorqueReason = "碟簧已壓平（無預壓力）";
+    else if (r.sigma_OM >= sigma_ult) detorqueReason = "極限：瀕臨斷裂";
+    else if (!isElastic)         detorqueReason = "塑性：永久變形";
+    else                         detorqueReason = "✓ 在彈性區、未壓平";
 
     setRes({
       ...r, De, Di, t, h0, s, mat, E, nu, nP, nS,
       F_stack, s_stack, k_stack, L0_stack,
-      Sut_typ, sigma_allow, SF, m,
+      Sut_typ, sigma_allow, sigma_ult, SF, m,
+      isFlat, isElastic, willDetorque, detorqueReason,
     });
   };
 
@@ -2735,15 +2774,27 @@ function BellevilleModule() {
                   ["堆疊自由高",   fmt2(res.L0_stack), "mm"],
                   ["最大應力 σ_OM", fmt1(res.sigma_OM), "MPa"],
                   ["許用應力",     fmt1(res.sigma_allow), "MPa"],
-                ].map(([l, v, u]) => (
+                  ["極限應力 σ_ult", fmt1(res.sigma_ult), "MPa"],
+                  ["螺絲退磅?", res.willDetorque ? "會" : "不會", "",
+                    res.willDetorque ? C.red : C.green],
+                ].map(([l, v, u, color]) => (
                   <div key={l}>
                     <Label>{l}</Label>
                     <div>
-                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      <span style={{ color: color || C.ice, fontFamily: "Courier New", fontSize: 13, fontWeight: color ? 700 : 400 }}>{v}</span>
                       {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
                     </div>
                   </div>
                 ))}
+              </div>
+              <div style={{
+                marginTop: 10, padding: "6px 10px",
+                background: (res.willDetorque ? C.red : C.green) + "18",
+                borderLeft: `3px solid ${res.willDetorque ? C.red : C.green}`,
+                borderRadius: 3, fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5,
+                color: res.willDetorque ? C.red : C.green,
+              }}>
+                {res.detorqueReason}
               </div>
             </Card>
 
@@ -2898,9 +2949,26 @@ function WaveModule() {
 
     const Sut_typ     = m.coeff * Math.pow(t, m.exp);
     const sigma_allow = 0.55 * Sut_typ;   // 波形彈簧靜態許用
+    const sigma_ult   = Sut_typ;          // 極限應力 ≈ Sut（抗拉極限）
     const SF          = r.sigma > 0 ? sigma_allow / r.sigma : Infinity;
 
-    setRes({ ...r, OD, ID, t, N, n, H0, Hw, s, mat, m, Sut_typ, sigma_allow, SF });
+    // ── 退磅與壓實判定 ─────────────────────────────────────────────
+    const Ls_w = n * t;                       // 實體高 (multi-turn crest-to-crest)
+    const isSolid     = Hw <= Ls_w;           // 工作高 ≤ 實體高 = 壓實
+    const isElastic   = r.sigma < sigma_allow;
+    const willDetorque = !isElastic || isSolid;
+    let detorqueReason;
+    if (isSolid && !isElastic)          detorqueReason = "壓實 + 塑性變形";
+    else if (isSolid)                   detorqueReason = "彈簧已壓實（無預壓力）";
+    else if (r.sigma >= sigma_ult)      detorqueReason = "極限：瀕臨斷裂";
+    else if (!isElastic)                detorqueReason = "塑性：永久變形";
+    else                                detorqueReason = "✓ 在彈性區、未壓實";
+
+    setRes({
+      ...r, OD, ID, t, N, n, H0, Hw, s, mat, m,
+      Sut_typ, sigma_allow, sigma_ult, SF,
+      isSolid, isElastic, willDetorque, detorqueReason,
+    });
   };
 
   const row = { display: "flex", flexWrap: "wrap", gap: 20 };
@@ -2981,16 +3049,28 @@ function WaveModule() {
                   ["實體高 (n×t)",  fmt2(res.n * res.t), "mm"],
                   ["工作應力 σ",    fmt1(res.sigma), "MPa"],
                   ["許用應力",      fmt1(res.sigma_allow), "MPa"],
+                  ["極限應力 σ_ult", fmt1(res.sigma_ult), "MPa"],
                   ["Sut (估算)",    fmt1(res.Sut_typ), "MPa"],
-                ].map(([l, v, u]) => (
+                  ["螺絲退磅?", res.willDetorque ? "會" : "不會", "",
+                    res.willDetorque ? C.red : C.green],
+                ].map(([l, v, u, color]) => (
                   <div key={l}>
                     <Label>{l}</Label>
                     <div>
-                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      <span style={{ color: color || C.ice, fontFamily: "Courier New", fontSize: 13, fontWeight: color ? 700 : 400 }}>{v}</span>
                       {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
                     </div>
                   </div>
                 ))}
+              </div>
+              <div style={{
+                marginTop: 10, padding: "6px 10px",
+                background: (res.willDetorque ? C.red : C.green) + "18",
+                borderLeft: `3px solid ${res.willDetorque ? C.red : C.green}`,
+                borderRadius: 3, fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5,
+                color: res.willDetorque ? C.red : C.green,
+              }}>
+                {res.detorqueReason}
               </div>
             </Card>
 
@@ -3309,10 +3389,24 @@ function RectSpringModule() {
       }
     }
 
+    // ── 退磅與壓實判定 ─────────────────────────────────────────────
+    const Ls_A         = Nt * r.t_axial;
+    const tauUlt       = 0.65 * Sut;
+    const isSolid      = Lw <= Ls_A;
+    const isElastic    = r.tau < tauAllow;
+    const willDetorque = !isElastic || isSolid;
+    let detorqueReason;
+    if (isSolid && !isElastic)   detorqueReason = "壓實 + 塑性變形";
+    else if (isSolid)            detorqueReason = "彈簧已壓實（無預壓力）";
+    else if (r.tau >= tauUlt)    detorqueReason = "頸縮：瀕臨斷裂";
+    else if (!isElastic)         detorqueReason = "塑性：永久變形";
+    else                         detorqueReason = "✓ 在彈性區、未壓實";
+
     setRes({
-      ...r, Sut, tauAllow, SF, dEq, Nt,
-      Ls: Nt * r.t_axial,
+      ...r, Sut, tauAllow, tauUlt, SF, dEq, Nt,
+      Ls: Ls_A,
       Ne, mat, matData, L0, Lw, end, D, Na,
+      isSolid, isElastic, willDetorque, detorqueReason,
       par, ser, mix, nP: n_par, nS: ser ? nS : (mix ? 2 : 1),
       k_total: k_system, F_total: F_system,
       delta_total: delta_system, L0_total: L0_system, Lw_total: Lw_system,
@@ -3602,15 +3696,27 @@ function RectSpringModule() {
                   ["實體高 Ls",   fmt2(res.Ls), "mm"],
                   ["工作應力 τ",  fmt1(res.tau), "MPa"],
                   ["許用應力",    fmt1(res.tauAllow), "MPa"],
-                ].map(([l, v, u]) => (
+                  ["極限應力 τ_ult", fmt1(res.tauUlt), "MPa"],
+                  ["螺絲退磅?", res.willDetorque ? "會" : "不會", "",
+                    res.willDetorque ? C.red : C.green],
+                ].map(([l, v, u, color]) => (
                   <div key={l}>
                     <Label>{l}</Label>
                     <div>
-                      <span style={{ color: C.ice, fontFamily: "Courier New", fontSize: 13 }}>{v}</span>
+                      <span style={{ color: color || C.ice, fontFamily: "Courier New", fontSize: 13, fontWeight: color ? 700 : 400 }}>{v}</span>
                       {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
                     </div>
                   </div>
                 ))}
+              </div>
+              <div style={{
+                marginTop: 10, padding: "6px 10px",
+                background: (res.willDetorque ? C.red : C.green) + "18",
+                borderLeft: `3px solid ${res.willDetorque ? C.red : C.green}`,
+                borderRadius: 3, fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5,
+                color: res.willDetorque ? C.red : C.green,
+              }}>
+                {res.detorqueReason}
               </div>
             </Card>
 
