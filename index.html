@@ -894,33 +894,31 @@ function SpringDiagram({ d, D, Na, L0, Lw, OD, Ls, Ne }) {
 // Optional props for plasticity overlay:
 // ── Force–Deflection chart (elastic + plastic + fracture regions) ─────────
 // Optional props for plasticity overlay:
-//   tau:     current working shear stress (MPa)
-//   Sut:     ultimate tensile strength of wire (MPa)
-//   F:       current working force (used to derive τ-per-F ratio)
-// When all three are supplied, the chart shows:
-//   1. Elastic region (sky-blue, slope = k) — up to δ_yield
-//   2. Plastic region (amber, slope = k·5%) — yield → ULT
-//   3. Fracture region (red, F decays from F_ult to 0) — ULT → rupture
-function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
+//   tau:        current working stress (shear or bending, MPa)
+//   Sut:        ultimate tensile strength (MPa)
+//   F:          current working force (used to derive stress-per-F ratio)
+//   stressType: "shear" (default, for coil/rect) or "bending" (for wave)
+// Yield/ult ratios:
+//   shear:   τ_y = 0.45·Sut,  τ_u = 0.65·Sut
+//   bending: σ_y = 0.85·Sut,  σ_u = 1.00·Sut
+function ForceChart({ k, delta, F, Ls, L0, tau, Sut, stressType = "shear" }) {
   const dMax = L0 - Ls;
 
   // ─── Compute elastic / plastic / fracture transitions ─────────────────────
-  // Shear yield ≈ 0.45 × Sut, shear ultimate ≈ 0.65 × Sut (Wahl values)
   let deltaYield = Infinity, F_yield = Infinity;
   let deltaUlt   = Infinity, F_ult   = Infinity;
-  let deltaBreak = Infinity;          // total fracture deflection
+  let deltaBreak = Infinity;
   const havePlastic = (tau > 0 && Sut > 0 && F > 0 && k > 0);
   if (havePlastic) {
+    const yieldRatio = stressType === "bending" ? 0.85 : 0.45;
+    const ultRatio   = stressType === "bending" ? 1.00 : 0.65;
     const tauPerF  = tau / F;
-    const tauYield = 0.45 * Sut;
-    const tauUlt   = 0.65 * Sut;
+    const tauYield = yieldRatio * Sut;
+    const tauUlt   = ultRatio   * Sut;
     F_yield   = tauYield / tauPerF;
     F_ult     = tauUlt / tauPerF;
     deltaYield = F_yield / k;
-    // Plastic region length: 5% strain-hardening slope between yield and ULT
     deltaUlt   = deltaYield + (F_ult - F_yield) / (k * 0.05);
-    // Fracture region: necking — F drops from F_ult to 0 over a length
-    // typically 40–80% of the plastic region. Use 0.6 × (deltaUlt - deltaYield).
     const necking = 0.6 * (deltaUlt - deltaYield);
     deltaBreak = deltaUlt + necking;
   }
@@ -930,9 +928,23 @@ function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
     ? Math.max(dMax * 1.05, deltaBreak * 1.05)
     : dMax * 1.05;
 
+  // ─── Solid point: F at δ_solid (= dMax = L₀ − Ls) on the curve ────────────
+  // Compute the force at solid by tracing which region δ_solid falls in.
+  const k_p = k * 0.05;                                    // 塑性段斜率
+  function F_onCurve(x) {
+    if (!havePlastic || x <= deltaYield) return k * x;     // 彈性
+    if (x <= deltaUlt)   return F_yield + (x - deltaYield) * k_p;  // 塑性
+    if (x <= deltaBreak) {
+      const u = (x - deltaUlt) / (deltaBreak - deltaUlt);
+      return F_ult * 0.5 * (1 + Math.cos(Math.PI * u));   // 頸縮
+    }
+    return 0;                                              // 已斷裂
+  }
+  const F_solid  = F_onCurve(dMax);
+  const F_design = F_onCurve(delta);    // ← 設計值的紅點吸附到曲線上
+
   // Build curve points — three series so each region gets its own colour
   const N = 100;
-  const k_p = k * 0.05;                          // plastic slope
   const points = [];
   for (let i = 0; i <= N; i++) {
     const x = (xUpper * i) / N;
@@ -1000,8 +1012,8 @@ function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+      <ResponsiveContainer width="100%" height={280}>
+        <LineChart data={points} margin={{ top: 30, right: 16, left: 0, bottom: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
           <XAxis type="number" dataKey="x" domain={[0, xUpper]} stroke={C.dim}
                  tick={{ fill: C.dim, fontSize: 10, fontFamily: "JetBrains Mono" }}
@@ -1009,8 +1021,9 @@ function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
           <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "JetBrains Mono" }}
                  label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
           <Tooltip content={<TooltipContent />} />
-          <ReferenceLine x={dMax} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.5}
-                         label={{ value: "Ls", fill: C.amber, fontSize: 9, position: "top" }} />
+          {/* 壓實點：彈簧 δ_solid = L₀ − Ls，物理上無法再壓縮 — 只保留垂直虛線 */}
+          <ReferenceLine x={dMax} stroke={C.amber} strokeDasharray="6 3" strokeWidth={2}
+                         label={{ value: "壓實 Ls", fill: C.amber, fontSize: 10, fontWeight: 700, position: "top" }} />
           {havePlastic && deltaYield < xUpper && (
             <ReferenceLine x={deltaYield} stroke={C.green} strokeDasharray="3 3" strokeWidth={1.2}
                            label={{ value: "降伏", fill: C.green, fontSize: 9, position: "top" }} />
@@ -1023,11 +1036,15 @@ function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
             <ReferenceLine x={deltaBreak} stroke="#777" strokeDasharray="3 3" strokeWidth={1.2}
                            label={{ value: "斷裂", fill: "#999", fontSize: 9, position: "top" }} />
           )}
-          <ReferenceDot x={delta} y={F} r={0} />
+          {/* 設計值 (working point) — 紅色顯眼圓點 */}
+          <ReferenceDot x={delta} y={F_design} r={7}
+                        fill={C.red} stroke="#fff" strokeWidth={2.5}
+                        isFront={true}
+                        label={{ value: "設計值", fill: C.red, fontSize: 10, fontWeight: 700, position: "top" }} />
           {/* Elastic */}
           <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
                 connectNulls={false} isAnimationActive={false}
-                dot={<CustomDot />} activeDot={{ r: 4, fill: C.ice }} />
+                dot={false} activeDot={{ r: 4, fill: C.ice }} />
           {/* Plastic */}
           {havePlastic && (
             <Line type="monotone" dataKey="Fp" stroke={C.amber} strokeWidth={2.5}
@@ -1042,8 +1059,22 @@ function ForceChart({ k, delta, F, Ls, L0, tau, Sut }) {
           )}
         </LineChart>
       </ResponsiveContainer>
+      <div style={{ marginTop: 6, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap",
+                    fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>
+        <span style={{ color: C.red, fontWeight: 700 }}>
+          ● 設計值 δ = {delta.toFixed(2)} mm，曲線上 F = {F_design.toFixed(1)} N
+          {Math.abs(F - F_design) / Math.max(F, 1) > 0.02 && (
+            <span style={{ color: C.amber, marginLeft: 4 }}>
+              （彈性外推 F = {F.toFixed(1)} N，已超過降伏）
+            </span>
+          )}
+        </span>
+        <span style={{ color: C.amber, fontWeight: 700 }}>
+          │ 壓實 δ_solid = {dMax.toFixed(2)} mm，F_solid = {F_solid.toFixed(1)} N
+        </span>
+      </div>
       {havePlastic && (
-        <div style={{ marginTop: 6, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap",
+        <div style={{ marginTop: 4, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap",
                       fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>
           <span style={{ color: C.sky }}>━ 彈性</span>
           <span style={{ color: C.amber }}>┅ 塑性 (k·5%)</span>
@@ -2583,6 +2614,10 @@ function BellevilleDiagram({ De, Di, t, h0, s = 0, nParallel = 1, nSeries = 1 })
 }
 
 function BellevilleForceChart({ points, workingS, workingF, h0 }) {
+  // 壓平點（碟簧的「壓實」）：s = h0
+  const flatPoint = points.find(p => Math.abs(p.x - h0) < h0 * 0.04);
+  const F_flat = flatPoint ? flatPoint.F : 0;
+
   const CustomDot = ({ cx, cy, payload }) => {
     if (Math.abs(payload.x - workingS) > h0 * 0.018) return null;
     return <circle cx={cx} cy={cy} r={6} fill={C.red} stroke="#fff" strokeWidth={2} />;
@@ -2600,22 +2635,39 @@ function BellevilleForceChart({ points, workingS, workingF, h0 }) {
   };
 
   return (
-    <ResponsiveContainer width="100%" height={210}>
-      <LineChart data={points} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
-        <XAxis dataKey="x" stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
-               label={{ value: "壓縮量 s (mm)", position: "insideBottomRight", offset: -4, fill: C.dim, fontSize: 10 }} />
-        <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
-               label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
-        <Tooltip content={<TooltipContent />} />
-        <ReferenceLine x={h0 * 0.75} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.2}
-                       label={{ value: "0.75·h₀ (疲勞極限)", fill: C.amber, fontSize: 8, position: "top" }} />
-        <ReferenceLine x={h0} stroke={C.red} strokeDasharray="4 3" strokeWidth={1.2}
-                       label={{ value: "h₀ (壓平)", fill: C.red, fontSize: 8, position: "top" }} />
-        <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
-              dot={<CustomDot />} activeDot={{ r: 4, fill: C.ice }} />
-      </LineChart>
-    </ResponsiveContainer>
+    <div>
+      <ResponsiveContainer width="100%" height={270}>
+        <LineChart data={points} margin={{ top: 30, right: 16, left: 0, bottom: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={C.border} />
+          <XAxis type="number" dataKey="x" domain={[0, h0 * 1.05]} stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
+                 label={{ value: "壓縮量 s (mm)", position: "insideBottomRight", offset: -4, fill: C.dim, fontSize: 10 }} />
+          <YAxis stroke={C.dim} tick={{ fill: C.dim, fontSize: 10, fontFamily: "Courier New" }}
+                 label={{ value: "F (N)", angle: -90, position: "insideLeft", fill: C.dim, fontSize: 10 }} />
+          <Tooltip content={<TooltipContent />} />
+          <ReferenceLine x={h0 * 0.75} stroke={C.amber} strokeDasharray="4 3" strokeWidth={1.2}
+                         label={{ value: "0.75·h₀ (疲勞極限)", fill: C.amber, fontSize: 8, position: "top" }} />
+          {/* 壓平點：碟簧的「壓實」位置 — 只保留垂直虛線 */}
+          <ReferenceLine x={h0} stroke={C.amber} strokeDasharray="6 3" strokeWidth={2}
+                         label={{ value: "壓平 s=h₀", fill: C.amber, fontSize: 10, fontWeight: 700, position: "top" }} />
+          {/* 設計值 (working point) — 紅色顯眼圓點 */}
+          <ReferenceDot  x={workingS} y={workingF} r={7}
+                         fill={C.red} stroke="#fff" strokeWidth={2.5}
+                         isFront={true}
+                         label={{ value: "設計值", fill: C.red, fontSize: 10, fontWeight: 700, position: "top" }} />
+          <Line type="monotone" dataKey="F" stroke={C.sky} strokeWidth={2.5}
+                dot={false} activeDot={{ r: 4, fill: C.ice }} />
+        </LineChart>
+      </ResponsiveContainer>
+      <div style={{ marginTop: 6, display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap",
+                    fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>
+        <span style={{ color: C.red, fontWeight: 700 }}>
+          ● 設計值 s = {workingS.toFixed(2)} mm，F = {workingF.toFixed(1)} N
+        </span>
+        <span style={{ color: C.amber, fontWeight: 700 }}>
+          │ 壓平 s = h₀ = {h0.toFixed(2)} mm，F_flat ≈ {F_flat.toFixed(1)} N
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -3084,7 +3136,7 @@ function WaveModule() {
           <Card>
             <SectionTitle icon="📈">力 vs 壓縮量</SectionTitle>
             <ForceChart k={res.k} delta={res.s} F={res.F} Ls={res.n * res.t} L0={res.H0}
-              tau={res.sigma} Sut={res.Sut_typ} />
+              tau={res.sigma} Sut={res.Sut_typ} stressType="bending" />
           </Card>
 
           {/* 應力 */}
