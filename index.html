@@ -2784,7 +2784,7 @@ function ConicalSpringModule() {
     const matData = MAT_G[mat];
     const Ne = END_COILS[end];
     const Nt = Na + Ne;
-    const r  = calcConicalSpring(d, D1, D2, matData.G, L0, Lw);
+    const r  = calcConicalSpring(d, D1, D2, Na, matData.G, L0, Lw);
 
     // 材料強度（依線徑決定，公式與線圈相同）
     const Sut      = matData.coeff * Math.pow(d, matData.exp);
