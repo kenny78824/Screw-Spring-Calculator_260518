@@ -117,6 +117,47 @@ function calcSpring(d, D, Na, G, L0, Lw) {
   return { C, delta, k, F, Kw, tau, OD, ID };
 }
 
+// 錐形線圈彈簧（Conical / Tapered Coil Spring）
+// 兩端徑不同 (D1 小端 / D2 大端)，剛度隨壓縮遞增：
+// 初期線性（所有圈作動）→ 大圈先觸底 → k 逐步升高（漸進式）
+//
+// 積分推導：Σ 每圈柔度  1/k_coil(D) = 8·D³/(G·d⁴)
+// 令 D(u) = D1 + (D2-D1)·u/Na，  ∫₀^Na D³ du = Na·(D1+D2)(D1²+D2²)/4
+// →  k_linear = G·d⁴ / [2·Na·(D1+D2)(D1²+D2²)]
+//
+// 應力最危險處：大端 D2（Wahl 因子與 D 均最大）
+function calcConicalSpring(d, D1, D2, Na, G, L0, Lw) {
+  const delta   = L0 - Lw;
+  const D_avg   = (D1 + D2) / 2;
+  const Cmin    = D1 / d;                         // 小端彈簧指數
+  const Cmax    = D2 / d;                         // 大端彈簧指數
+
+  // 初期線性彈簧常數（所有圈作動）
+  const k = (G * d**4) / (2 * Na * (D1 + D2) * (D1**2 + D2**2));
+
+  const F = k * delta;
+
+  // 應力：Wahl 因子取大端（最危險）
+  const Kw_max = wahl(Cmax);
+  const Kw_min = wahl(Cmin);
+  const tau_max = F > 0 ? (Kw_max * 8 * F * D2) / (Math.PI * d**3) : 0;
+  const tau_min = F > 0 ? (Kw_min * 8 * F * D1) / (Math.PI * d**3) : 0;
+
+  // Telescoping 判定：若大小圈徑差 > 2·d，大圈可套過小圈 → 可折疊
+  const telescoping = (D2 - D1) > 2 * d;
+  const taperRatio  = D2 / D1;                    // 錐度比
+
+  return {
+    delta, k, F, D_avg, Cmin, Cmax, Kw_max, Kw_min,
+    tau: tau_max,                                 // 主應力（大端）
+    tau_min,                                      // 參考應力（小端）
+    OD_max: D2 + d, ID_max: D2 - d,               // 大端內外徑
+    OD_min: D1 + d, ID_min: D1 - d,               // 小端內外徑
+    telescoping, taperRatio,
+    D1, D2, Na,
+  };
+}
+
 // 碟形彈簧（Belleville）— DIN 2093 公式
 function calcBelleville(De, Di, t, h0, s, E, nu) {
   const dRatio = De / Di;
@@ -382,6 +423,109 @@ function helicalSweepMesh({ D, pitch, turns, segPerTurn, pitchSegments, grindEnd
     const a = endStart + j;
     const b = endStart + (j + 1) % profCount;
     tris.push([centerE, a, b]);  // end cap
+  }
+
+  return { verts, tris };
+}
+
+// Tapered version: radius varies linearly along z from D1/2 (top) to D2/2 (bottom).
+// Used for conical (tapered) coil springs. Same triangulation logic as
+// helicalSweepMesh, but the sweep circle radius is a function of z.
+function taperedHelicalSweepMesh({ D1, D2, segPerTurn, pitchSegments, grindEnds }, profile) {
+  const verts = [];
+  const tris  = [];
+  const profCount = profile.length;
+
+  const segs = pitchSegments && pitchSegments.length
+    ? pitchSegments
+    : [{ turns: 1, pitch: 1 }];
+
+  const path = [{ ang: 0, z: 0, pitch: segs[0].pitch }];
+  let angAccum = 0, zAccum = 0;
+  for (const s of segs) {
+    const subSegs = Math.max(1, Math.round(s.turns * segPerTurn));
+    const dAng = s.turns * 2 * Math.PI / subSegs;
+    const dZ   = s.turns * s.pitch / subSegs;
+    for (let i = 0; i < subSegs; i++) {
+      angAccum += dAng;
+      zAccum   += dZ;
+      path.push({ ang: angAccum, z: zAccum, pitch: s.pitch });
+    }
+  }
+  const totalSegs   = path.length - 1;
+  const totalLength = path[path.length - 1].z;
+
+  // Linear radius interpolation along the axis
+  const rA = D1 / 2, rB = D2 / 2;
+  const radiusAt = (z) => rA + (rB - rA) * (totalLength > 0 ? z / totalLength : 0);
+
+  for (const pt of path) {
+    const { ang, z, pitch: pLocal } = pt;
+    const radius = radiusAt(z);
+    const cosA = Math.cos(ang), sinA = Math.sin(ang);
+    const tanX = -radius * sinA, tanY = radius * cosA, tanZ = pLocal / (2 * Math.PI);
+    const tlen = Math.hypot(tanX, tanY, tanZ);
+    const tX = tanX / tlen, tY = tanY / tlen, tZ = tanZ / tlen;
+    const nX = cosA, nY = sinA, nZ = 0;
+    const bX = tY * nZ - tZ * nY;
+    const bY = tZ * nX - tX * nZ;
+    const bZ = tX * nY - tY * nX;
+
+    const cx = radius * cosA, cy = radius * sinA, cz = z;
+    for (const [px, py] of profile) {
+      verts.push([
+        cx + nX * px + bX * py,
+        cy + nY * px + bY * py,
+        cz + nZ * px + bZ * py,
+      ]);
+    }
+  }
+
+  for (let i = 0; i < totalSegs; i++) {
+    const rIdx0 = i * profCount;
+    const rIdx1 = (i + 1) * profCount;
+    for (let j = 0; j < profCount; j++) {
+      const a = rIdx0 + j;
+      const b = rIdx0 + (j + 1) % profCount;
+      const c = rIdx1 + (j + 1) % profCount;
+      const d = rIdx1 + j;
+      tris.push([a, b, c]);
+      tris.push([a, c, d]);
+    }
+  }
+
+  if (grindEnds) {
+    for (const v of verts) {
+      if (v[2] < 0)            v[2] = 0;
+      if (v[2] > totalLength)  v[2] = totalLength;
+    }
+  }
+
+  // End caps
+  const endStart = totalSegs * profCount;
+  const startVerts = verts.slice(0, profCount);
+  const sx = startVerts.reduce((s, v) => s + v[0], 0) / profCount;
+  const sy = startVerts.reduce((s, v) => s + v[1], 0) / profCount;
+  const sz = grindEnds ? 0 : startVerts.reduce((s, v) => s + v[2], 0) / profCount;
+  const center0 = verts.length;
+  verts.push([sx, sy, sz]);
+
+  const endVerts = verts.slice(endStart, endStart + profCount);
+  const ex = endVerts.reduce((s, v) => s + v[0], 0) / profCount;
+  const ey = endVerts.reduce((s, v) => s + v[1], 0) / profCount;
+  const ez = grindEnds ? totalLength : endVerts.reduce((s, v) => s + v[2], 0) / profCount;
+  const centerE = verts.length;
+  verts.push([ex, ey, ez]);
+
+  for (let j = 0; j < profCount; j++) {
+    const a = j;
+    const b = (j + 1) % profCount;
+    tris.push([center0, b, a]);
+  }
+  for (let j = 0; j < profCount; j++) {
+    const a = endStart + j;
+    const b = endStart + (j + 1) % profCount;
+    tris.push([centerE, a, b]);
   }
 
   return { verts, tris };
@@ -659,6 +803,17 @@ function downloadCoilSpringStep({ d, D, Na, end, L0 }, filename) {
   downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
 }
 
+function downloadConicalSpringStep({ d, D1, D2, Na, end, L0 }, filename) {
+  const segments = buildPitchSegments(d, Na, L0, end);
+  const profile = circleProfile(d / 2, 14);
+  const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
+  const mesh = taperedHelicalSweepMesh(
+    { D1, D2, segPerTurn: 22, pitchSegments: segments, grindEnds },
+    profile
+  );
+  downloadStep(buildStepFile(mesh, filename.replace(/\.step$/, "")), filename);
+}
+
 function downloadRectSpringStep({ a, b, D, Na, end, L0 }, filename) {
   const segments = buildPitchSegments(a, Na, L0, end);
   const profile = rectProfile(a, b);
@@ -691,6 +846,15 @@ function buildCoilPreviewMesh({ d, D, Na, end, L0 }) {
   const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
   return helicalSweepMesh(
     { D, segPerTurn: 24, pitchSegments: segments, grindEnds },
+    circleProfile(d / 2, 16)
+  );
+}
+
+function buildConicalPreviewMesh({ d, D1, D2, Na, end, L0 }) {
+  const segments = buildPitchSegments(d, Na, L0, end);
+  const grindEnds = (end === "閉合並磨平 (+2)" || end === "開放磨平 (+1)");
+  return taperedHelicalSweepMesh(
+    { D1, D2, segPerTurn: 24, pitchSegments: segments, grindEnds },
     circleProfile(d / 2, 16)
   );
 }
@@ -1538,6 +1702,60 @@ function RectSpringSchematic() {
 
       {/* Na（圈數） */}
       <Note x="156" y="124" text="Na (有效圈)" color="#2E7D4F" size={9} />
+    </SchematicCard>
+  );
+}
+
+// 🎯 錐形線圈彈簧（cone shape 側視 + 標註）
+function ConicalSpringSchematic() {
+  // 錐形以梯形邊界勾勒；上窄下寬
+  // 7 個橢圓由小到大堆疊，形成錐面外觀
+  return (
+    <SchematicCard title="錐形線圈彈簧參數示意（側視）">
+      {/* 錐形輪廓（左右邊界線） */}
+      <line x1="82" y1="30" x2="52" y2="138" stroke="#7BB8E8" strokeWidth="0.6" strokeDasharray="3 3" opacity="0.5" />
+      <line x1="118" y1="30" x2="148" y2="138" stroke="#7BB8E8" strokeWidth="0.6" strokeDasharray="3 3" opacity="0.5" />
+
+      {/* 主體彈簧：7 個由小到大的橢圓 */}
+      {Array.from({length: 7}, (_, i) => {
+        const rx = 18 + i * 5;      // 從 18 → 48（半徑遞增）
+        const y  = 30 + i * 18;
+        return (
+          <ellipse key={i} cx="100" cy={y} rx={rx} ry="6"
+                   fill="none" stroke="#2E74B5" strokeWidth="2.5" opacity="0.85" />
+        );
+      })}
+
+      {/* 線徑截面（右下） */}
+      <circle cx="228" cy="120" r="10" fill="none" stroke="#F59E0B" strokeWidth="1.5" />
+      <Note x="248" y="120" text="d" color="#F59E0B" />
+      <Note x="228" y="142" text="(線徑)" color="#7A9BBE" anchor="middle" size={9} />
+
+      {/* D1 標註（頂部小端） */}
+      <DimArrow x1="82" y1="20" x2="118" y2="20" color="#7BB8E8" />
+      <Note x="100" y="12" text="D₁" color="#7BB8E8" anchor="middle" />
+      <Note x="100" y="9" text="(小端)" color="#7A9BBE" anchor="middle" size={8} />
+
+      {/* D2 標註（底部大端） */}
+      <DimArrow x1="52" y1="154" x2="148" y2="154" color="#7BB8E8" />
+      <Note x="100" y="166" text="D₂" color="#7BB8E8" anchor="middle" />
+      <Note x="100" y="176" text="(大端)" color="#7A9BBE" anchor="middle" size={9} />
+
+      {/* L₀ 標註（左側） */}
+      <DimArrow x1="38" y1="24" x2="38" y2="138" color="#B91C1C" />
+      <Note x="30" y="76" text="L₀" color="#B91C1C" anchor="end" />
+      <Note x="30" y="88" text="(自由長)" color="#7A9BBE" anchor="end" size={9} />
+
+      {/* Lw 標註 */}
+      <line x1="45" y1="138" x2="65" y2="138" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <line x1="45" y1="60" x2="65" y2="60" stroke="#2E7D4F" strokeWidth="0.5" strokeDasharray="2 2" />
+      <DimArrow x1="60" y1="60" x2="60" y2="138" color="#2E7D4F" />
+      <Note x="66" y="98" text="Lw" color="#2E7D4F" />
+      <Note x="66" y="110" text="(工作長)" color="#7A9BBE" size={9} />
+
+      {/* Na 標註 */}
+      <Note x="170" y="76" text="Na" color="#2E7D4F" />
+      <Note x="170" y="88" text="(有效圈)" color="#7A9BBE" size={9} />
     </SchematicCard>
   );
 }
@@ -2528,6 +2746,255 @@ function SpringModule() {
                 支援 SolidWorks / Fusion 360 / Inventor / Creo<br />
                 可直接傳給彈簧廠商進行 CAM 加工
               </div>
+            </div>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MODULE B2: 錐形線圈彈簧（Conical / Tapered Coil Spring）
+// ════════════════════════════════════════════════════════════════════════════
+function ConicalSpringModule() {
+  const [d,   setD]   = useState(1.5);
+  const [D1,  setD1]  = useState(8.0);      // 小端
+  const [D2,  setD2]  = useState(16.0);     // 大端
+  const [Na,  setNa]  = useState(6.0);
+  const [end, setEnd] = useState("閉合並磨平 (+2)");
+  const [mat, setMat] = useState("碳鋼琴鋼線 SWC");
+  const [L0,  setL0]  = useState(30.0);
+  const [Lw,  setLw]  = useState(20.0);
+
+  const [res, setRes] = useState(null);
+  const [err, setErr] = useState("");
+
+  const calc = () => {
+    const errors = [];
+    if (d <= 0)            errors.push("線徑 d 須 > 0");
+    if (D1 <= 0 || D2 <= 0) errors.push("端徑 D₁, D₂ 須 > 0");
+    if (D1 >= D2)          errors.push("小端 D₁ 須 < 大端 D₂（否則不是錐形）");
+    if (D1 <= d)           errors.push("D₁ 須 > d（避免 ID < 0）");
+    if (Na < 1)            errors.push("有效圈 Na 須 ≥ 1");
+    if (Lw >= L0)          errors.push("工作長 Lw 須 < 自由長 L₀");
+    if (errors.length) { setErr(errors.join("；")); setRes(null); return; }
+    setErr("");
+
+    const matData = MAT_G[mat];
+    const Ne = END_COILS[end];
+    const Nt = Na + Ne;
+    const r  = calcConicalSpring(d, D1, D2, matData.G, L0, Lw);
+
+    // 材料強度（依線徑決定，公式與線圈相同）
+    const Sut      = matData.coeff * Math.pow(d, matData.exp);
+    const tauAllow = 0.45 * Sut;   // 剪降伏
+    const tauUlt   = 0.65 * Sut;   // 剪極限
+    const SF       = r.tau > 0 ? tauAllow / r.tau : Infinity;
+
+    // Ls：若可 telescope（D2-D1 > 2d）→ ≈ d + d（一個 pancake 高度）
+    //     否則正常堆疊 Nt × d
+    const Ls = r.telescoping ? d * 2 : Nt * d;
+
+    // ── 退磅與壓實判定 ─────────────────────────────────────────────────
+    const isSolid      = Lw <= Ls;
+    const isElastic    = r.tau < tauAllow;
+    const willDetorque = !isElastic || isSolid;
+    let detorqueReason;
+    if (isSolid && !isElastic)      detorqueReason = "壓實 + 塑性變形";
+    else if (isSolid)               detorqueReason = "彈簧已壓實（無預壓力）";
+    else if (r.tau >= tauUlt)       detorqueReason = "頸縮：瀕臨斷裂";
+    else if (!isElastic)            detorqueReason = "塑性：永久變形";
+    else                            detorqueReason = "✓ 在彈性區、未壓實";
+
+    setRes({
+      ...r,
+      d, Sut, tauAllow, tauUlt, SF, Nt, Ls, Ne,
+      mat, matData, L0, Lw, end,
+      isSolid, isElastic, willDetorque, detorqueReason,
+    });
+  };
+
+  const row = { display: "flex", flexWrap: "wrap", gap: 20 };
+
+  return (
+    <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+      <Card style={{ flex: "0 0 300px" }}>
+        <ConicalSpringSchematic />
+        <SectionTitle icon="🎯">錐形彈簧尺寸</SectionTitle>
+        <div style={row}>
+          <Input label="線徑 d"   value={d}  onChange={setD}  step={0.1} unit="mm" />
+          <Input label="有效圈 Na" value={Na} onChange={setNa} step={0.5} unit="圈" />
+        </div>
+        <div style={row}>
+          <Input label="小端 D₁"  value={D1} onChange={setD1} step={0.5} unit="mm" />
+          <Input label="大端 D₂"  value={D2} onChange={setD2} step={0.5} unit="mm" />
+        </div>
+        <div style={{ color: C.dim, fontSize: 10, fontFamily: "Courier New", marginBottom: 6, lineHeight: 1.6 }}>
+          ※ D₁ 為小端線圈中徑，D₂ 為大端線圈中徑；<br />
+          若 D₂ − D₁ &gt; 2·d 可 telescope 收合成極低 Ls
+        </div>
+        <Select label="端部型式" value={end} onChange={setEnd} options={Object.keys(END_COILS)} />
+
+        <SectionTitle icon="🔧">材料 & 工作條件</SectionTitle>
+        <Select label="材料" value={mat} onChange={setMat} options={Object.keys(MAT_G)} />
+        <div style={row}>
+          <Input label="自由長 L₀" value={L0} onChange={setL0} step={1} unit="mm" />
+          <Input label="工作長 Lw" value={Lw} onChange={setLw} step={1} unit="mm" />
+        </div>
+
+        {err && <div style={{ color: C.red, fontFamily: "Courier New", fontSize: 11, marginBottom: 10 }}>⚠ {err}</div>}
+        <CalcButton onClick={calc}>▶ 計算 k & F</CalcButton>
+      </Card>
+
+      {res && (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, minWidth: 400 }}>
+          {res.Cmax > 12 && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 大端彈簧指數 C₂ = {fmt2(res.Cmax)} &gt; 12，捲繞困難</div>}
+          {res.Cmin < 4  && <div style={{ padding: "10px", background: C.amber + "22", border: `1px solid ${C.amber}`, borderRadius: 6, color: C.amber, fontFamily: "Courier New", fontSize: 11 }}>⚠ 小端彈簧指數 C₁ = {fmt2(res.Cmin)} &lt; 4，應力集中過高</div>}
+
+          {res.telescoping && (
+            <div style={{
+              padding: "10px 14px", background: C.gold + "18",
+              borderLeft: `3px solid ${C.gold}`, borderRadius: 4, color: C.gold,
+              fontFamily: '"JetBrains Mono", monospace', fontSize: 11, lineHeight: 1.5,
+            }}>
+              ✓ 可 Telescoping：D₂ − D₁ = {fmt2(res.D2 - res.D1)} mm &gt; 2·d = {fmt2(2*res.d)} mm，<br />
+              　大圈可套過小圈，實體高 Ls ≈ 2·d = {fmt2(res.Ls)} mm（極低）
+            </div>
+          )}
+
+          {/* KPI row */}
+          <Card>
+            <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+              <div>
+                <Label>彈簧常數 k</Label>
+                <div><Value big color={C.green}>{fmt3(res.k)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N/mm</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>初期線性（所有圈作動）</div>
+              </div>
+              <div>
+                <Label>壓縮量 δ</Label>
+                <div><Value>{fmt2(res.delta)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>mm</span>
+                </div>
+              </div>
+              <div>
+                <Label>彈簧力 F</Label>
+                <div><Value big color={C.sky}>{fmt2(res.F)}</Value>
+                  <span style={{ color: C.dim, marginLeft: 6 }}>N</span>
+                </div>
+                <div style={{ color: C.dim, fontSize: 11 }}>{fmt3(res.F / 9.80665)} kgf</div>
+              </div>
+              <div>
+                <Label>安全係數（大端）</Label>
+                <div style={{ marginTop: 4 }}><Badge sf={res.SF} /></div>
+              </div>
+            </div>
+          </Card>
+
+          {/* 幾何 + 示意圖 */}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Card style={{ flex: "1 1 380px" }}>
+              <SectionTitle icon="📐">幾何摘要</SectionTitle>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px 14px", marginBottom: 8 }}>
+                {[
+                  ["小端 OD₁",  fmt2(res.OD_min), "mm"],
+                  ["小端 ID₁",  fmt2(res.ID_min), "mm"],
+                  ["小端 C₁",   fmt2(res.Cmin), ""],
+                  ["大端 OD₂",  fmt2(res.OD_max), "mm"],
+                  ["大端 ID₂",  fmt2(res.ID_max), "mm"],
+                  ["大端 C₂",   fmt2(res.Cmax), ""],
+                  ["Wahl Kw₁",  fmt3(res.Kw_min), ""],
+                  ["Wahl Kw₂",  fmt3(res.Kw_max), ""],
+                  ["錐度比 D₂/D₁", fmt2(res.taperRatio), ""],
+                  ["總圈數 Nt", res.Nt, "圈"],
+                  ["實體高 Ls", fmt2(res.Ls), "mm"],
+                  ["工作應力 τ (大端)", fmt1(res.tau), "MPa"],
+                  ["應力 τ (小端 參考)", fmt1(res.tau_min), "MPa"],
+                  ["許用應力", fmt1(res.tauAllow), "MPa"],
+                  ["極限應力 τ_ult", fmt1(res.tauUlt), "MPa"],
+                  ["螺絲退磅?", res.willDetorque ? "會" : "不會", "",
+                    res.willDetorque ? C.red : C.green],
+                ].map(([l, v, u, color]) => (
+                  <div key={l}>
+                    <Label>{l}</Label>
+                    <div>
+                      <span style={{ color: color || C.ice, fontFamily: "Courier New", fontSize: 13, fontWeight: color ? 700 : 400 }}>{v}</span>
+                      {u && <span style={{ color: C.dim, fontSize: 11, marginLeft: 3 }}>{u}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div style={{
+                marginTop: 10, padding: "6px 10px",
+                background: (res.willDetorque ? C.red : C.green) + "18",
+                borderLeft: `3px solid ${res.willDetorque ? C.red : C.green}`,
+                borderRadius: 3, fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5,
+                color: res.willDetorque ? C.red : C.green,
+              }}>
+                {res.detorqueReason}
+              </div>
+            </Card>
+
+            <Card style={{ flex: "1 1 260px" }}>
+              <SectionTitle icon="🧊">3D 預覽</SectionTitle>
+              <ThreeViewer mesh={buildConicalPreviewMesh({
+                d: res.d, D1: res.D1, D2: res.D2, Na: res.Na, end: res.end, L0: res.L0,
+              })} />
+            </Card>
+          </div>
+
+          {/* F-δ 圖 */}
+          <Card>
+            <SectionTitle icon="📈">簧力 vs 壓縮量（初期線性）</SectionTitle>
+            <ForceChart k={res.k} delta={res.delta} F={res.F} Ls={res.Ls} L0={res.L0}
+              tau={res.tau} Sut={res.Sut} />
+            <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", marginTop: 6, textAlign: "center" }}>
+              ⚠ 錐形彈簧為漸進式 — 大圈觸底後 k 會逐步上升，此圖僅顯示初期線性區
+            </div>
+          </Card>
+
+          {/* CAD download */}
+          <Card style={{ borderColor: C.gold + "44", background: C.gold + "08" }}>
+            <SectionTitle icon="💾">3D CAD 模型下載</SectionTitle>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+              <StepDownloadButton
+                onClick={() => {
+                  const ts = new Date().toISOString().slice(0,10).replace(/-/g,'');
+                  const fname = `ConicalSpring_d${res.d}_D${res.D1}-${res.D2}_L${res.L0}_${ts}.step`;
+                  downloadConicalSpringStep(
+                    { d: res.d, D1: res.D1, D2: res.D2, Na: res.Na, end: res.end, L0: res.L0 },
+                    fname
+                  );
+                }}
+              />
+              <div style={{ color: C.dim, fontSize: 10.5, fontFamily: "Courier New", lineHeight: 1.5 }}>
+                STEP AP203 格式 (Faceted BREP)<br />
+                錐形螺旋掃掠（半徑沿軸線性變化）
+              </div>
+            </div>
+          </Card>
+
+          {/* 廠商規格 */}
+          <Card style={{ borderColor: C.gold + "66" }}>
+            <SectionTitle icon="📋">廠商規格摘要</SectionTitle>
+            <div style={{ fontFamily: "Courier New", fontSize: 11.5, color: C.text, lineHeight: 2 }}>
+              型式：錐形壓縮螺旋彈簧（Conical / Tapered），{res.end}<br />
+              材料：{res.mat}（G = {res.matData.G.toLocaleString()} MPa）<br />
+              線徑 d ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.d} mm</span><br />
+              小端中徑 D₁ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.D1} mm</span>
+              　(OD₁ = {fmt2(res.OD_min)} mm ／ ID₁ = {fmt2(res.ID_min)} mm ／ C₁ = {fmt2(res.Cmin)})<br />
+              大端中徑 D₂ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.D2} mm</span>
+              　(OD₂ = {fmt2(res.OD_max)} mm ／ ID₂ = {fmt2(res.ID_max)} mm ／ C₂ = {fmt2(res.Cmax)})<br />
+              錐度比 D₂/D₁ ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt2(res.taperRatio)}</span>
+              {res.telescoping && <span style={{ color: C.green }}>　（可 telescoping）</span>}<br />
+              自由長 L₀ ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.L0} mm</span>
+              　(實體高 Ls = {fmt2(res.Ls)} mm)<br />
+              總圈數 Nt ＝ <span style={{ color: C.ice, fontWeight: 700 }}>{res.Nt} 圈</span>（有效圈 Na = {res.Na}）<br />
+              初期彈簧常數 k ＝ <span style={{ color: C.gold, fontWeight: 700 }}>{fmt3(res.k)} N/mm</span><br />
+              工作行程 δ ＝ {fmt2(res.delta)} mm → 簧力 F ＝ <span style={{ color: C.sky, fontWeight: 700 }}>{fmt2(res.F)} N</span>（{fmt3(res.F / 9.80665)} kgf）<br />
+              <span style={{ color: C.dim }}>※ 大端 τ = {fmt1(res.tau)} MPa 為主要控制值（Wahl 因子最大）</span>
             </div>
           </Card>
         </div>
@@ -3971,6 +4438,7 @@ function App() {
         <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
           <Tab label="🔩🌀 螺絲軸力 & 彈簧選型" active={tab === "screw"} onClick={() => setTab("screw")} />
           <Tab label="🌀 線圈彈簧 k & 簧力計算" active={tab === "spring"} onClick={() => setTab("spring")} />
+          <Tab label="🎯 錐形線圈彈簧"          active={tab === "conical"}   onClick={() => setTab("conical")} />
           <Tab label="🟨 矩形截面線圈彈簧"   active={tab === "rect"}      onClick={() => setTab("rect")} />
           <Tab label="🔶 碟形彈簧 Belleville"  active={tab === "belleville"} onClick={() => setTab("belleville")} />
           <Tab label="🌊 波形彈簧 Wave Spring"  active={tab === "wave"} onClick={() => setTab("wave")} />
@@ -3978,6 +4446,7 @@ function App() {
 
         {tab === "screw"      && <ScrewModule />}
         {tab === "spring"     && <SpringModule />}
+        {tab === "conical"    && <ConicalSpringModule />}
         {tab === "rect"       && <RectSpringModule />}
         {tab === "belleville" && <BellevilleModule />}
         {tab === "wave"       && <WaveModule />}
